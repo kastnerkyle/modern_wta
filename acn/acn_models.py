@@ -170,6 +170,16 @@ class PriorNetwork(nn.Module):
         self.neighbors = torch.LongTensor((batch_size, n_neighbors))
         self.distances = torch.FloatTensor((batch_size, n_neighbors))
         self.batch_indexer = torch.LongTensor(torch.arange(batch_size))
+        # TODO: can we do dist calc like Roland's hebbian K-means
+        # http://www.cs.toronto.edu/~rfm/code/hebbian_kmeans.py
+        #     X2 = (X**2).sum(1)[:, None]
+        #     for epoch in range(numepochs):
+        #         for i in range(0, X.shape[0], batchsize):
+        #             D = -2*numpy.dot(W, X[i:i+batchsize,:].T) + (W**2).sum(1)[:, None] + X2[i:i+batchsize].T
+        # Where X is self.codes, W is the incoming codes (or vice versa)
+        # Would need a bit of tricks to only update the entries of X and X2 that changed
+        # But would allow to cache more computations
+
 
     def to(self, device):
         new_self = super(PriorNetwork, self).to(device)
@@ -187,7 +197,7 @@ class PriorNetwork(nn.Module):
         with torch.no_grad():
             device = test.device
             bs = test.shape[0]
-            return_size = (bs,n_neighbors)
+            return_size = (bs, n_neighbors)
             # dont recreate unless necessary
             if self.neighbors.shape != return_size:
                 print('updating prior sizes')

@@ -6,6 +6,7 @@ from torch.nn import functional as F
 from torchvision import datasets, transforms
 from torch.utils.data import Dataset
 import imageio
+import time
 
 # from jalexvig
 def parse_flags():
@@ -66,6 +67,7 @@ def train(vae: VAE,
 
     vae.train()
     train_loss = 0
+    steps = 0
     for idx, (data, label, batch_idx) in enumerate(data_loader):
         inputs = data.view(data.shape[0], -1).to(device)
         optimizer.zero_grad()
@@ -94,9 +96,11 @@ def train(vae: VAE,
 
             torch.save(vae.state_dict(), FPATH_VAE)
             torch.save(prior.state_dict(), FPATH_PRIOR)
+        steps += 1
 
     print('====> Epoch: {} Average loss: {:.4f}'.format(
         idx_epoch, train_loss / len(data_loader.dataset)))
+    return steps
 
 
 def daydream(image: torch.Tensor,
@@ -144,8 +148,19 @@ if args.task == 'train':
     params = list(vae.parameters()) + list(prior.parameters())
     optimizer = optim.Adam(params)
 
-    for i in range(100):
-        train(vae, prior, optimizer, i)
+    total_steps = 0
+    start_time = time.time()
+    n_epochs = 100
+    for i in range(n_epochs):
+        this_steps = train(vae, prior, optimizer, i)
+        total_steps += this_steps
+    end_time = time.time()
+    run_time = end_time - start_time
+    print("Total training time {} seconds".format(run_time))
+    print("Dataset size in examples {}".format(len(data_loader.dataset)))
+    print("Number of epochs {}".format(n_epochs))
+    print("Total train steps taken in batches {}".format(total_steps))
+    print("Average time per batch {} seconds".format(run_time / float(total_steps)))
 else:
     test_loader = torch.utils.data.DataLoader(
         IndexedDataset(datasets.MNIST, path='../data', train=False, transform=transforms.ToTensor()),

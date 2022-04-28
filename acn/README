@@ -1,0 +1,13 @@
+python acn.py
+to train
+
+python acn.py --task=daydream
+
+changes from https://github.com/jalexvig/associative_compression_networks and https://github.com/johannah/ACN
+tried to make sure everything is created and stored on device, large full batch distance calc rather than loops
+
+Total training time 896.0809817314148 seconds
+Dataset size in examples 60000
+Number of epochs 100
+Total train steps taken in batches 46900
+Average time per batch 0.019106204301309482 seconds
