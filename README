@@ -1,0 +1,20 @@
+Performance details of acn/ and even_faster_acn/
+Base acn is pretty fast already, vectorized the distance calcs over https://github.com/johannah/ACN, which using a simple on GPU knn setup using topk, compared to https://github.com/jalexvig/associative_compression_networks which used sklearn on CPU
+
+Timing comparison between acn and even faster acn, same model size dataset, etc, etc.
+
+acn/
+Total training time 896.0809817314148 seconds
+Dataset size in examples 60000
+Number of epochs 100
+Total train steps taken in batches 46900
+Average time per batch 0.019106204301309482 seconds
+
+even_faster_acn/
+Total training time 556.3746314048767 seconds
+Dataset size in examples 60000
+Number of epochs 100
+Total train steps taken in batches 46900
+Average time per batch 0.011862998537417414 seconds
+
+Check the kneighbors functions in each folder's acn_models for the changes
