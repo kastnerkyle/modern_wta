@@ -1,0 +1,16 @@
+python acn.py
+to train
+
+python acn.py --task=daydream
+
+changes from https://github.com/jalexvig/associative_compression_networks and https://github.com/johannah/ACN
+tried to make sure everything is created and stored on device, large full batch distance calc rather than loops
+
+This version is even faster than the one in ../acn, using a cached partial gram matrix calc. See code comments in "kneighbors" function for details,
+or https://www.robots.ox.ac.uk/~albanie/notes/Euclidean_distance_trick.pdf . It may not be faster in every scenario, so I figured having implementations of each would be useful
+
+Total training time 556.3746314048767 seconds
+Dataset size in examples 60000
+Number of epochs 100
+Total train steps taken in batches 46900
+Average time per batch 0.011862998537417414 seconds
