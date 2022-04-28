@@ -1,5 +1,5 @@
 Performance details of acn/ and even_faster_acn/
-Base acn is pretty fast already, vectorized the distance calcs over https://github.com/johannah/ACN, which using a simple on GPU knn setup using topk, compared to https://github.com/jalexvig/associative_compression_networks which used sklearn on CPU
+Base acn is pretty fast already, vectorized the distance calcs over https://github.com/johannah/ACN, which uses a simple on GPU knn setup using torch.topk, compared to https://github.com/jalexvig/associative_compression_networks which used sklearn KNeighbors on CPU
 
 Timing comparison between acn and even faster acn, same model size dataset, etc, etc.
 
