@@ -3,6 +3,10 @@ Base acn is pretty fast already, vectorized the distance calcs over https://gith
 
 Timing comparison between acn and even faster acn, same model size (512 hidden, see code for model and prior arch), same machine, same V100 GPU, pytorch 1.10.1+cu102 , on the MNIST dataset. Training losses seem similar up to randomness (seeds aren't set here)
 
+These timings get a lot faster using my own dataloader, rather than our (necessary) subclass of PyTorch's default one in to_go_even_further_beyond
+
+
+
 acn/
 ====> Epoch: 99 Average loss: 84.3620
 Total training time 896.0809817314148 seconds
@@ -11,6 +15,8 @@ Number of epochs 100
 Total train steps taken in batches 46900
 Average time per batch 0.019106204301309482 seconds
 
+
+
 even_faster_acn/
 ====> Epoch: 99 Average loss: 84.4206
 Total training time 556.3746314048767 seconds
@@ -18,5 +24,16 @@ Dataset size in examples 60000
 Number of epochs 100
 Total train steps taken in batches 46900
 Average time per batch 0.011862998537417414 seconds
+
+
+
+to_go_even_further_beyond_speed_acn/
+====> Epoch: 99 Average loss: 84.4268
+Total training time 306.72198724746704 seconds
+Dataset size in examples 60000
+Number of epochs 100
+Total train steps taken in batches 46900
+Average time per batch 0.0065399144402445 seconds
+
 
 Check the kneighbors functions on PriorModel() in each folder's acn_models.py for the changes
