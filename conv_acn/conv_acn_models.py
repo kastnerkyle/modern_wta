@@ -13,26 +13,40 @@ from torch import nn, optim
 from torch.nn import functional as F
 from torchvision import datasets, transforms
 
-class VAE(torch.nn.Module):
+class ConvVAE(torch.nn.Module):
     def __init__(self, code_len, batch_size):
         super().__init__()
-        batch_size
+        self.hidden_size = 64
+        hidden_size = self.hidden_size
 
-        self.fc1 = nn.Linear(28 * 28, 512)
-        self.fc2_u = nn.Linear(512, code_len)
-        self.fc2_logstd = nn.Linear(512, code_len)
-        self.fc3 = nn.Linear(code_len, 512)
-        self.fc4 = nn.Linear(512, 28 * 28)
+        self.c1 = nn.Conv2d(1, hidden_size, 5, 1, padding=0)
+        self.c2 = nn.Conv2d(hidden_size, hidden_size, 5, 1, padding=0)
+        self.c3 = nn.Conv2d(hidden_size, hidden_size // 4, 5, 1, padding=0)
+        self.l4 = nn.Linear(16 * 16 * hidden_size // 4, hidden_size)
+        self.l5 = nn.Linear(hidden_size, hidden_size)
+        self.l_u = nn.Linear(hidden_size, code_len)
+        self.l_logstd = nn.Linear(hidden_size, code_len)
+        self.il4 = nn.Linear(code_len, 16 * 16 * hidden_size // 4)
+        self.ic3 = nn.ConvTranspose2d(hidden_size // 4, hidden_size, 5, 1, padding=0)
+        self.ic2 = nn.ConvTranspose2d(hidden_size, hidden_size, 5, 1, padding=0)
+        self.ic1 = nn.ConvTranspose2d(hidden_size, 1, 5, 1, padding=0)
 
     def encode(self, inputs: torch.Tensor):
-        h1 = F.relu(self.fc1(inputs))
-        mu, logstd = self.fc2_u(h1), self.fc2_logstd(h1)
+        h1 = F.relu(self.c1(inputs))
+        h2 = F.relu(self.c2(h1))
+        h3 = F.relu(self.c3(h2))
+        h3 = h3.reshape((-1, 16 * 16 * self.hidden_size // 4))
+        h4 = F.relu(self.l4(h3))
+        h5 = F.relu(self.l5(h4))
+        mu, logstd = self.l_u(h5), self.l_logstd(h5)
         return mu, logstd
 
     def decode(self, latent: torch.Tensor):
-        h3 = F.relu(self.fc3(latent))
-        h4 = torch.sigmoid(self.fc4(h3))
-        return h4
+        ih1 = F.relu(self.il4(latent).reshape(-1, self.hidden_size // 4, 16, 16))
+        ih2 = F.relu(self.ic3(ih1))
+        ih3 = F.relu(self.ic2(ih2))
+        ih4 = torch.sigmoid(self.ic1(ih3))
+        return ih4
 
     def forward(self, inputs: torch.Tensor):
         u, logstd = self.encode(inputs)

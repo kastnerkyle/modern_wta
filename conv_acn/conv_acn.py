@@ -1,4 +1,4 @@
-from conv_acn_models import VAE, PriorNetwork
+from conv_acn_models import ConvVAE, PriorNetwork
 import numpy as np
 import torch
 import os
@@ -74,7 +74,7 @@ def dataset_itr(batch_size, subset_type="train", seed=1234):
 code_len = 20
 batch_size = 128
 n_neighbors = 5
-model_save_path = "acn_models"
+model_save_path = "conv_acn_models"
 dataset_len = 60000
 testset_len = 10000
 
@@ -89,33 +89,33 @@ next(test_itr);
 if not os.path.exists(model_save_path):
     os.makedirs(model_save_path)
 
-FPATH_VAE = os.path.join(model_save_path, 'vae.pth')
+FPATH_VAE = os.path.join(model_save_path, 'conv_vae.pth')
 FPATH_PRIOR = os.path.join(model_save_path, 'prior.pth')
 
 args = parse_flags()
 
-vae = VAE(code_len, batch_size)
+model = ConvVAE(code_len, batch_size)
 prior = PriorNetwork(code_len, dataset_len, k=n_neighbors)
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 print("Using device {}".format(device))
-vae = vae.to(device)
+model = model.to(device)
 prior = prior.to(device)
 
-def train(vae: VAE,
-          prior: PriorNetwork,
-          optimizer: torch.optim.Optimizer,
-          idx_epoch: int):
+def train(model,
+          prior,
+          optimizer,
+          idx_epoch):
 
-    vae.train()
+    model.train()
     train_loss = 0
     steps = 0
     max_steps = int(dataset_len / float(batch_size))
     for idx, (data, label, batch_idx) in enumerate(train_itr):
-        inputs = torch.tensor(data.reshape(data.shape[0], -1).astype("float32") / 255.).to(device)
+        inputs = torch.tensor(data.reshape(data.shape[0], 1, 28, 28).astype("float32") / 255.).to(device)
         optimizer.zero_grad()
 
-        outputs, u_q, s_q = vae(inputs)
+        outputs, u_q, s_q = model(inputs)
         u_p, s_p = prior(u_q)
 
         xent = F.binary_cross_entropy(outputs, inputs, reduction='sum')
@@ -137,7 +137,7 @@ def train(vae: VAE,
                 idx_epoch, idx * len(data), dataset_len, 100 * (idx * len(data)) / float(dataset_len),
                 loss.item() / dataset_len))
 
-            torch.save(vae.state_dict(), FPATH_VAE)
+            torch.save(model.state_dict(), FPATH_VAE)
             torch.save(prior.state_dict(), FPATH_PRIOR)
         steps += 1
         if steps > max_steps:
@@ -148,11 +148,11 @@ def train(vae: VAE,
     return steps
 
 
-def daydream(image: torch.Tensor,
-             vae: VAE,
-             prior: PriorNetwork,
-             num_iters: int=0,
-             save_gif: bool=False):
+def daydream(image,
+             model,
+             prior,
+             num_iters=0,
+             save_gif=False):
 
     import matplotlib.pyplot as plt
     import matplotlib.animation as animation
@@ -171,14 +171,14 @@ def daydream(image: torch.Tensor,
             plt.axis('off')
             plt.show()
 
-        latent, _ = vae.encode(image)
+        latent, _ = model.encode(image)
 
         # Generate guess of next latent
         #next_latent, _ = prior.encode(latent)
         next_latent, _ = prior(latent)
 
-        decode_image = vae.decode(next_latent).clone().detach()
-        image = decode_image.reshape(1, -1)
+        decode_image = model.decode(next_latent).clone().detach()
+        image = decode_image.reshape(1, 1, 28, 28)
         i += 1
         if i % 200 == 0:
             print("Daydream step {}".format(i))
@@ -190,14 +190,14 @@ def daydream(image: torch.Tensor,
 
 
 if args.task == 'train':
-    params = list(vae.parameters()) + list(prior.parameters())
+    params = list(model.parameters()) + list(prior.parameters())
     optimizer = optim.Adam(params)
 
     total_steps = 0
     start_time = time.time()
     n_epochs = 100
     for i in range(n_epochs):
-        this_steps = train(vae, prior, optimizer, i)
+        this_steps = train(model, prior, optimizer, i)
         total_steps += this_steps
     end_time = time.time()
     run_time = end_time - start_time
@@ -213,12 +213,12 @@ else:
 
     idx, (data, label, batch_idx) = next(enumerate(test_loader))
 
-    vae.load_state_dict(torch.load(FPATH_VAE))
+    model.load_state_dict(torch.load(FPATH_VAE))
     prior.load_state_dict(torch.load(FPATH_PRIOR))
 
-    img_ = data[0].view(1, -1).to(device)
+    img_ = data[0].reshape(1, 1, 28, 28).to(device)
 
-    daydream(img_, vae, prior, num_iters=10000, save_gif=True)
+    daydream(img_, model, prior, num_iters=10000, save_gif=True)
 
 """
 # might need to modify imagemagick policy xml if errors
