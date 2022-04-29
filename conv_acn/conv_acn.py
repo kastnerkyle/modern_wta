@@ -1,4 +1,4 @@
-from acn_models import VAE, PriorNetwork
+from conv_acn_models import VAE, PriorNetwork
 import numpy as np
 import torch
 import os
