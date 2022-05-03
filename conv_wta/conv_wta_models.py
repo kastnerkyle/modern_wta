@@ -23,29 +23,26 @@ def spatial_sparsity(x):
     return x * equals(x, maxes)
 
 
-class ConvWTAVAE(torch.nn.Module):
+class ConvWTA(torch.nn.Module):
     def __init__(self, code_len, batch_size):
-        super().__init__()
+        super(ConvWTA, self).__init__()
         self.hidden_size = 128
         hidden_size = self.hidden_size
 
         self.c1 = nn.Conv2d(1, hidden_size, 5, 1, padding=0)
         self.c2 = nn.Conv2d(hidden_size, hidden_size, 5, 1, padding=0)
-        self.c3 = nn.Conv2d(hidden_size, hidden_size // 4, 5, 1, padding=0)
-        self.l4 = nn.Linear(16 * 16 * hidden_size // 4, hidden_size)
-        self.l5 = nn.Linear(hidden_size, hidden_size)
-        self.l_u = nn.Linear(hidden_size, code_len)
-        self.l_logstd = nn.Linear(hidden_size, code_len)
-        self.il4 = nn.Linear(code_len, 16 * 16 * hidden_size // 4)
-        self.ic4 = nn.ConvTranspose2d(hidden_size // 4, hidden_size, 5, 1, padding=2)
+        self.c3 = nn.Conv2d(hidden_size, hidden_size, 5, 1, padding=0)
         self.ic3 = nn.ConvTranspose2d(hidden_size, hidden_size, 5, 1, padding=0)
         self.ic2 = nn.ConvTranspose2d(hidden_size, hidden_size, 5, 1, padding=0)
         self.ic1 = nn.ConvTranspose2d(hidden_size, 1, 5, 1, padding=0)
+        #self.ic3 = nn.Conv2d(hidden_size, hidden_size, 5, 1, padding=4)
+        #self.ic2 = nn.Conv2d(hidden_size, hidden_size, 5, 1, padding=4)
+        #self.ic1 = nn.Conv2d(hidden_size, 1, 5, 1, padding=4)
 
     def spatial_sparsity(self, h):
         return spatial_sparsity(h)
 
-    def lifetime_sparsity(self, h, rate=0.2):
+    def lifetime_sparsity(self, h, rate=0.05):
         shp = h.shape
         n = shp[0]
         c = shp[1]
@@ -56,7 +53,7 @@ class ConvWTAVAE(torch.nn.Module):
         batch_mask = batch_mask.reshape(shp)
         return h * batch_mask
 
-    def channel_sparsity(self, h, rate=0.2):
+    def channel_sparsity(self, h, rate=0.05):
         shp = h.shape
         n = shp[0]
         c = shp[1]
@@ -67,7 +64,7 @@ class ConvWTAVAE(torch.nn.Module):
         batch_mask = batch_mask.reshape(shp)
         return h * batch_mask
 
-    def encode(self, inputs: torch.Tensor, spatial=False, lifetime=False):
+    def encode(self, inputs: torch.Tensor, spatial=True, lifetime=True):
         h1 = F.relu(self.c1(inputs))
         h2 = F.relu(self.c2(h1))
         h3 = F.relu(self.c3(h2))
@@ -75,56 +72,19 @@ class ConvWTAVAE(torch.nn.Module):
             h3 = self.spatial_sparsity(h3)
         if lifetime:
             h3 = self.lifetime_sparsity(h3)
-        h3 = h3.reshape((-1, 16 * 16 * self.hidden_size // 4))
-        h4 = F.relu(self.l4(h3))
-        h5 = F.relu(self.l5(h4))
-        mu, logstd = self.l_u(h5), self.l_logstd(h5)
-        return mu, logstd
-
-    def decode_through_spatial_sparsity(self, latent, lifetime=True, spatial=True):
-        ih1 = F.relu(self.il4(latent).reshape(-1, self.hidden_size // 4, 16, 16))
-        ih2 = F.relu(self.ic4(ih1))
-        if spatial:
-            ih2 = self.spatial_sparsity(ih2)
-        if lifetime:
-            ih2 = self.lifetime_sparsity(ih2)
-        return ih2
+        return h3
 
     def decode(self, latent: torch.Tensor, spatial=True, lifetime=True):
-        ih1 = F.relu(self.il4(latent).reshape(-1, self.hidden_size // 4, 16, 16))
-        ih2 = F.relu(self.ic4(ih1))
-        if spatial:
-            ih2 = self.spatial_sparsity(ih2)
-        if lifetime:
-            ih2 = self.lifetime_sparsity(ih2)
-        ih3 = F.relu(self.ic3(ih2))
-        ih4 = F.relu(self.ic2(ih3))
-        ih5 = self.ic1(ih4)
-        return ih5
+        ih1 = F.relu(self.ic3(latent))
+        ih2 = F.relu(self.ic2(ih1))
+        ih3 = torch.sigmoid(self.ic1(ih2))
+        #ih3 = self.ic1(ih2)
+        return ih3
 
     def forward(self, inputs: torch.Tensor):
-        u, logstd = self.encode(inputs)
-        h2 = self.reparametrize(u, logstd)
-        output = self.decode(h2)
-        return output, u, logstd
-
-    def reparametrize(self,
-                      u: torch.Tensor,
-                      s: torch.Tensor):
-        """
-        Draw from standard normal distribution (as input) and then parametrize it (so params can be backpropped).
-
-        Args:
-            u: Means.
-            s: Log standard deviations.
-
-        Returns: Draws from a distribution.
-        """
-        if self.training:
-            std = s.exp()
-            activations = u + std * torch.randn_like(u)
-            return activations
-        return u
+        latent = self.encode(inputs)
+        output = self.decode(latent)
+        return output, latent
 
 
 class SlowPriorNetwork(torch.nn.Module):
