@@ -100,7 +100,7 @@ def dataset_itr(batch_size, subset_type="train", seed=1234):
         # return in a similar format as pytorch
         yield batch, batch_label, batch_inds
 
-code_len = 32
+code_len = 48
 model_hidden_size = 256
 prior_hidden_size = 512
 batch_size = 128
@@ -130,12 +130,14 @@ FPATH_PRIOR = os.path.join(model_save_path, 'prior.pth')
 args = parse_flags()
 
 model = ConvACNVQVAE(model_hidden_size, code_len, batch_size)
-prior = PriorNetwork(prior_hidden_size, code_len, dataset_len, k=n_neighbors)
+prior = PriorNetwork(prior_hidden_size, code_len, dataset_len, k=n_neighbors, code_multiple=4)
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 print("Using device {}".format(device))
 model = model.to(device)
 prior = prior.to(device)
+
+train_aug_random_state = np.random.RandomState(4124)
 
 def train(model,
           prior,
@@ -147,11 +149,20 @@ def train(model,
     steps = 0
     max_steps = int(dataset_len / float(batch_size))
     for idx, (data, label, batch_idx) in enumerate(train_itr):
-        inputs = torch.tensor(data.reshape(data.shape[0], 1, 28, 28).astype("float32") / 255.).to(device)
+
+        inputs_np = data.reshape(data.shape[0], 1, 28, 28).astype("float32") / 255.
+        # data augmentation batchwise (for ease of use with the vq prior
+        # use numpy rot 90
+        aug_i = train_aug_random_state.randint(4)
+        if aug_i == 0:
+            pass
+        else:
+            inputs_np = np.rot90(inputs_np, k=aug_i, axes=(2, 3)).copy()
+        inputs = torch.tensor(inputs_np).to(device)
         optimizer.zero_grad()
 
         outputs, u_q, s_q, vq_e_z, vq_q_z, vq_indices = model(inputs)
-        u_p, s_p = prior(u_q)
+        u_p, s_p = prior(u_q, code_offset_index=aug_i)
 
         xent = F.binary_cross_entropy_with_logits(outputs, inputs, reduction='sum')
 

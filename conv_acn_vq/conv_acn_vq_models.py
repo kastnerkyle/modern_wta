@@ -310,10 +310,12 @@ class SlowPriorNetwork(torch.nn.Module):
 
 
 class PriorNetwork(nn.Module):
-    def __init__(self, n_hidden, code_length, size_training_set, k=5, random_seed=4543):
+    def __init__(self, n_hidden, code_length, size_training_set, k=5, code_multiple=1, random_seed=4543):
         super(PriorNetwork, self).__init__()
         self.rdn = np.random.RandomState(random_seed)
         self.k = k
+        # this allows for data augmentation
+        self.code_multiple = code_multiple
         self.size_training_set = size_training_set
         self.code_length = code_length
         self.input_layer = nn.Linear(code_length, n_hidden)
@@ -328,10 +330,10 @@ class PriorNetwork(nn.Module):
         self.fc_s = nn.Linear(n_hidden, self.code_length)
 
         # needs to be a param so that we can load
-        self.codes = nn.Parameter(torch.FloatTensor(self.rdn.standard_normal((self.size_training_set, self.code_length))), requires_grad=False)
+        self.codes = nn.Parameter(torch.FloatTensor(self.rdn.standard_normal((self.size_training_set, self.code_length * self.code_multiple))), requires_grad=False)
 
         self.codes2_init = False
-        self.codes2 = torch.FloatTensor((self.size_training_set, 1))
+        self.codes2 = torch.FloatTensor(self.rdn.standard_normal((self.size_training_set, self.code_multiple)))
 
         # start off w/ default batch size - this will change automatically if
         # different input is given
@@ -350,13 +352,15 @@ class PriorNetwork(nn.Module):
         new_self.codes2 = new_self.codes2.to(device)
         return new_self
 
-    def update_codebook(self, indexes, values):
+    def update_codebook(self, indexes, values, code_offset_index=0):
         assert indexes.min() >= 0
         assert indexes.max() < self.codes.shape[0]
-        self.codes[indexes] = values
-        self.codes2[indexes] = torch.square(self.codes[indexes]).sum(axis=1)[:, None]
+        lb = code_offset_index * self.code_length
+        rb = (code_offset_index + 1) * self.code_length
+        self.codes[indexes, lb:rb] = values
+        self.codes2[indexes, code_offset_index] = torch.square(self.codes[indexes, lb:rb]).sum(axis=1)
 
-    def kneighbors(self, test, n_neighbors):
+    def kneighbors(self, test, n_neighbors, code_offset_index=0):
         with torch.no_grad():
             device = test.device
             bs = test.shape[0]
@@ -376,7 +380,10 @@ class PriorNetwork(nn.Module):
 
             if self.codes2_init == False:
                 self.codes2_init = True
-                self.codes2 = torch.square(self.codes).sum(axis=1)[:, None]
+                for _i in range(self.code_multiple):
+                    lbi = _i * self.code_length
+                    rbi = (_i + 1) * self.code_length
+                    self.codes2[:, _i] = torch.square(self.codes[:, lbi:rbi]).sum(axis=1)
                 # DONE: can do dist calc like Roland's hebbian K-means
                 # http://www.cs.toronto.edu/~rfm/code/hebbian_kmeans.py
                 #     X2 = (X**2).sum(1)[:, None]
@@ -389,7 +396,9 @@ class PriorNetwork(nn.Module):
                 # see detailed writeup https://www.robots.ox.ac.uk/~albanie/notes/Euclidean_distance_trick.pdf
                 # this should save memory and be a decent speedup on large datasets, potentially
 
-            dists = -2 * torch.matmul(test, self.codes.T) + torch.square(test).sum(axis=1)[:, None] + self.codes2.T
+            lb = code_offset_index * self.code_length
+            rb = (code_offset_index + 1) * self.code_length
+            dists = -2 * torch.matmul(test, self.codes[:, lb:rb].T) + torch.square(test).sum(axis=1)[:, None] + self.codes2[:, code_offset_index][:, None].T
             # broadcast it
             #dists = torch.sum(torch.square(test[:, None] - self.codes[None]), dim=-1)
             bidxs = self.batch_indexer
@@ -397,21 +406,23 @@ class PriorNetwork(nn.Module):
             del dists
         return self.distances.detach(), self.neighbors.detach()
 
-    def batch_pick_close_neighbor(self, codes):
+    def batch_pick_close_neighbor(self, codes, code_offset_index=0):
         '''
         :code latent activation of training
         '''
-        neighbor_distances, neighbor_indexes = self.kneighbors(codes, n_neighbors=self.k)
+        lb = code_offset_index * self.code_length
+        rb = (code_offset_index + 1) * self.code_length
+        neighbor_distances, neighbor_indexes = self.kneighbors(codes, n_neighbors=self.k, code_offset_index=code_offset_index)
         bsize = neighbor_indexes.shape[0]
         if self.training:
             # randomly choose neighbor index from top k
-            chosen_neighbor_index = torch.LongTensor(self.rdn.randint(0,neighbor_indexes.shape[1],size=bsize))
+            chosen_neighbor_index = torch.LongTensor(self.rdn.randint(0, neighbor_indexes.shape[1],size=bsize))
         else:
             chosen_neighbor_index = torch.LongTensor(torch.zeros(bsize, dtype=torch.int64))
-        return self.codes[neighbor_indexes[self.batch_indexer, chosen_neighbor_index]]
+        return self.codes[neighbor_indexes[self.batch_indexer, chosen_neighbor_index], lb:rb]
 
-    def forward(self, codes):
-        previous_codes = self.batch_pick_close_neighbor(codes)
+    def forward(self, codes, code_offset_index=0):
+        previous_codes = self.batch_pick_close_neighbor(codes, code_offset_index=code_offset_index)
         return self.encode(previous_codes)
 
     def encode(self, prev_code):
