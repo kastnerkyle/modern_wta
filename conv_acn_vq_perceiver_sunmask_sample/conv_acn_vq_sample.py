@@ -72,8 +72,15 @@ train_data_labels_np = train_data_f[train_data_f.files[3]].T
 test_data_f = np.load(mnist_path)
 test_data_np = test_data_f[test_data_f.files[0]].T
 test_data_labels_np = test_data_f[test_data_f.files[1]].T
-#kuzu_train = "/content/drive/MyDrive/kuzushiji_MNIST/k49-train-imgs.npz"
-#kuzu_test = "/content/drive/MyDrive/kuzushiji_MNIST/k49-test-imgs.npz"
+
+
+kuzu_train_image_path = "k49-train-imgs.npz"
+kuzu_train_label_path = "k49-train-labels.npz"
+
+kuzu_test_image_path = "k49-test-imgs.npz"
+kuzu_test_label_path = "k49-test-labels.npz"
+
+kuzu_test = "/content/drive/MyDrive/kuzushiji_MNIST/k49-test-imgs.npz"
 def dataset_itr(batch_size, subset_type="train", seed=1234):
     """
     Coroutine of experience replay.
@@ -90,6 +97,25 @@ def dataset_itr(batch_size, subset_type="train", seed=1234):
         label_np = data_f[data_f.files[1]].T
     else:
         raise ValueError("Unknown subset_type {}".format(subset_type))
+    """
+    TODO: support kuzu and arbitrary rotations thereof
+    if subset_type == "train":
+        data_f = np.load(kuzu_train_image_path)
+        data_np = data_f["arr_0"]
+        label_f = np.load(kuzu_train_label_path)
+        label_np = label_f["arr_0"]
+    elif subset_type == "test":
+        data_f = np.load(kuzu_test_image_path)
+        data_np = data_f["arr_0"]
+        label_f = np.load(kuzu_test_label_path)
+        label_np = label_f["arr_0"]
+    else:
+        raise ValueError("Unknown subset_type {}".format(subset_type))
+    """
+    max_sz = len(data_np)
+    # 232365
+    # 38547
+    random_state = np.random.RandomState(seed)
     max_sz = len(data_np)
     random_state = np.random.RandomState(seed)
     while True:
@@ -100,7 +126,7 @@ def dataset_itr(batch_size, subset_type="train", seed=1234):
         # return in a similar format as pytorch
         yield batch, batch_label, batch_inds
 
-code_len = 32
+code_len = 48
 model_hidden_size = 256
 prior_hidden_size = 512
 batch_size = 128
@@ -130,7 +156,7 @@ FPATH_PRIOR = os.path.join(model_save_path, 'prior.pth')
 args = parse_flags()
 
 model = ConvACNVQVAE(model_hidden_size, code_len, batch_size)
-prior = PriorNetwork(prior_hidden_size, code_len, dataset_len, k=n_neighbors)
+prior = PriorNetwork(prior_hidden_size, code_len, dataset_len, k=n_neighbors, code_multiple=4)
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 print("Using device {}".format(device))
@@ -153,23 +179,32 @@ if args.task == "reconstruct":
     ground_truth_target = d["ground_truth_target"]
 
     each_pred = []
+    each_pred.append(("ground_truth_target", ground_truth_target))
     each_pred.append(("context0_pred", context0_pred))
     each_pred.append(("context1_pred", context1_pred))
     each_pred.append(("context2_pred", context2_pred))
     each_pred.append(("final_pred", final_pred))
-    each_pred.append(("ground_truth_target", ground_truth_target))
 
     import matplotlib.pyplot as plt
 
-    for el in each_pred:
+    f, axarr = plt.subplots(10, 7)
+    for _j, el in enumerate(each_pred):
         code_tmp = model.vq_indices_to_codes(torch.tensor(el[1]).long().to(device))
         out_code = model.decode(code_tmp).detach().cpu().data.numpy()
         out_im = sigmoid_np(out_code)
 
-        for _v in range(context0_pred.shape[0]):
-            plt.imshow(out_im[_v, 0], cmap="gray")
-            plt.savefig("{}_{}.png".format(_v, el[0]))
-            plt.close()
+        for _i in range(context0_pred.shape[0]):
+            lr = _j
+            if lr > 0:
+                lr = _j + 1
+                axarr[_i, _j].axis('off')
+            if _j == (len(each_pred) - 1):
+                lr = _j + 2
+                axarr[_i, _j + 1].axis('off')
+            axarr[_i, lr].imshow(out_im[_i, 0], cmap="gray")
+            axarr[_i, lr].axis('off')
+    plt.savefig("combined_out.png")
+    plt.close()
     print("finished reconstruction, wrote out sampled images")
 elif "encode" in args.task:
     seed_everything(1234)
@@ -194,16 +229,19 @@ elif "encode" in args.task:
     image_batch = torch.tensor(data.reshape(data.shape[0], 1, 28, 28).astype("float32") / 255.).to(device)
     acn_z_flat, acn_mu_flat, acn_log_std_flat, vq_e_z, vq_q_z, vq_indices = model.encode(image_batch)
 
-    dists, indices = prior.kneighbors(acn_mu_flat, n_neighbors=5)
+    dists, indices = prior.kneighbors(acn_mu_flat, n_neighbors=5, code_offset_index=0)
 
     neighbor_data_batches = [train_data_np[indices[i]].reshape(-1, 1, 28, 28) for i in range(indices.shape[0])]
     neighbor_data_labels = [train_data_labels_np[indices[i]] for i in range(indices.shape[0])]
 
     # encode the original data but rotated
-    image_batch = torch.tensor(data.reshape(data.shape[0], 1, 28, 28).astype("float32") / 255.).to(device)
+    image_batch_np = data.reshape(data.shape[0], 1, 28, 28).astype("float32") / 255.
+
+    n_rot = 3
 
     if args.task == "encode_rotate":
-        image_batch = image_batch.permute(0, 1, 3, 2)
+        image_batch_np = np.rot90(image_batch_np, k=n_rot, axes=(2, 3)).copy()
+    image_batch = torch.tensor(image_batch_np).to(device)
     acn_z_flat, acn_mu_flat, acn_log_std_flat, vq_e_z, vq_q_z, vq_indices = model.encode(image_batch)
 
     data_batches = data.reshape(data.shape[0], 1, 28, 28)
@@ -217,16 +255,17 @@ elif "encode" in args.task:
     for _i in range(len(neighbor_data_batches)):
         data = neighbor_data_batches[_i]
         # rotate them all before encoding
-        image_batch = torch.tensor(data.reshape(data.shape[0], 1, 28, 28).astype("float32") / 255.).to(device)
+        image_batch_np = data.reshape(data.shape[0], 1, 28, 28).astype("float32") / 255.
         # rotate 90
         if args.task == "encode_rotate":
-            image_batch = image_batch.permute(0, 1, 3, 2)
+            image_batch_np = np.rot90(image_batch_np, k=n_rot, axes=(2, 3)).copy()
+        image_batch = torch.tensor(image_batch_np).to(device)
         acn_z_flat, acn_mu_flat, acn_log_std_flat, vq_e_z, vq_q_z, vq_indices = model.encode(image_batch)
         neighbor_data_batches_quantized.append(vq_indices.argmax(axis=1).cpu().data.numpy())
 
     # rotate neighbor data to match
     if args.task == "encode_rotate":
-        neighbor_data_batches = np.concatenate([nb[None].transpose(0, 1, 2, 4, 3) for nb in neighbor_data_batches], axis=0)
+        neighbor_data_batches = np.concatenate([np.rot90(nb[None], k=n_rot, axes=(3, 4)).copy() for nb in neighbor_data_batches], axis=0)
     else:
         neighbor_data_batches = np.concatenate([nb[None] for nb in neighbor_data_batches], axis=0)
     neighbor_data_labels = np.concatenate([nl[None] for nl in neighbor_data_labels], axis=0)

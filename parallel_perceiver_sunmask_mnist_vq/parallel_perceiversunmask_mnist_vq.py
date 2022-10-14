@@ -1,4 +1,4 @@
-from perceiversunmask_mnist_vq_models import PerceiverSUNMASK, clipping_grad_value_, RampOpt
+from parallel_perceiversunmask_mnist_vq_models import PerceiverSUNMASK, clipping_grad_value_, RampOpt
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -38,6 +38,7 @@ def parse_flags():
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--task', default='train', choices=['train','sample'], help='Task to do.')
+    parser.add_argument('--quad', default='A', choices=['A', 'B', 'C', 'D'], help='Quadrant to target.')
     args = parser.parse_args()
     return args
 
@@ -67,17 +68,13 @@ class IndexedDataset(Dataset):
 #print(d.files)
 #['test', 'test_labels', 'train', 'train_labels']
 
-mnist_path = "../mnist.npz"
-train_data_f = np.load(mnist_path)
-train_data_np = train_data_f[train_data_f.files[2]].T
-train_data_labels_np = train_data_f[train_data_f.files[3]].T
+mnist_path = "mnist_vq.npz"
+data_f = np.load(mnist_path)
 
-test_data_f = np.load(mnist_path)
-test_data_np = test_data_f[test_data_f.files[0]].T
-test_data_labels_np = test_data_f[test_data_f.files[1]].T
-
-mnist_vq_path = "mnist_vq.npz"
-d = np.load(mnist_vq_path)
+comb_fixed_split_inds = np.random.RandomState(7777).randint(0, 60000, size=10000)
+valid_fixed_split_inds = np.sort(comb_fixed_split_inds[:5000])
+test_fixed_split_inds = np.sort(comb_fixed_split_inds[-5000:])
+train_fixed_split_inds = np.array([el for el in np.arange(60000) if el not in comb_fixed_split_inds])
 #d["train_vq_indices"]
 #d["train_vq_match_indices"]
 #d["train_vq_match_dists"]
@@ -93,60 +90,35 @@ def dataset_itr(batch_size, subset_type="train", seed=1234):
     a random batch of previous replay experiences.
     """
     if subset_type == "train":
-        data_f = np.load(mnist_path)
-        # subset to 50k only for the actual targets
-        # this does allow some "valid" entries as conditional inputs
-        data_np = data_f[data_f.files[2]].T
-        label_np = data_f[data_f.files[3]].T
-        data_vq_np = d["train_vq_indices"]
-        data_match_indices_np = d["train_vq_match_indices"]
+        data_np = data_f["train_vq_indices"]
+        data_np = data_np[train_fixed_split_inds]
     elif subset_type == "valid":
-        data_f = np.load(mnist_path)
-        # need to reference full train set
-        data_np = data_f[data_f.files[2]].T
-        label_np = data_f[data_f.files[3]].T
-        data_vq_np = d["train_vq_indices"]
-        data_match_indices_np = d["train_vq_match_indices"]
+        data_np = data_f["train_vq_indices"]
+        data_np = data_np[valid_fixed_split_inds]
     elif subset_type == "test":
-        data_f = np.load(mnist_path)
-        data_np = data_f[data_f.files[0]].T
-        label_np = data_f[data_f.files[1]].T
-        # no test vq indices used
-        data_vq_np = 0 * d["train_vq_indices"]
-        data_match_indices_np = d["test_vq_match_indices"]
+        data_np = data_f["train_vq_indices"]
+        data_np = data_np[test_fixed_split_inds]
     else:
         raise ValueError("Unknown subset_type {}".format(subset_type))
 
-    if subset_type == "train":
-        max_sz = 50000
-    elif subset_type == "valid":
-        max_sz = 10000
-    elif subset_type == "test":
-        max_sz = 10000
-
+    max_sz = len(data_np)
     random_state = np.random.RandomState(seed)
     while True:
         inds = np.arange(max_sz)
-        if subset_type == "valid":
-            inds = inds + 50000
         batch_inds = random_state.choice(inds, size=batch_size, replace=True)
-
-        # B C H W (C is 1)
-        batch = data_vq_np[batch_inds][:, None]
-        # B N H W (N is neighbors)
-        batch_matches = np.concatenate([data_vq_np[data_match_indices_np[el]][None] for el in batch_inds], axis=0)
+        batch = data_np[batch_inds]
+        batch = batch.reshape((batch.shape[0], 1, 16, 16))
         # return in a similar format as pytorch
-        yield batch, batch_matches, batch_inds
+        yield batch, batch_inds
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 batch_size = 12
 # this is a multiple of 4 - so 16 * 4 -> 64 latent length is 1 measure
-latent_length = int(16 * 16)
+latent_length = int(8 * 8)
+# 3 other quadrants for total of 4
 sequence_length = int(4 * latent_length)
-n_classes = vq_classes = 512
-n_neighbors = 5
-n_neighbors_in_context = 3
+n_classes = 512
 
 n_unrolled_steps = 2
 
@@ -159,9 +131,8 @@ inner_dropout_keep_prob = 1.0
 final_dropout_keep_prob = 1.0
 n_layers = 16
 
-model_save_path = "perceiversunmask_mnist_vq_models"
-dataset_len = 60000
-testset_len = 10000
+args = parse_flags()
+model_save_path = "parallel_perceiversunmask_mnist_vq_models_quad_{}".format(args.quad)
 
 clip_grad = 3
 n_train_steps = 125000
@@ -190,7 +161,6 @@ if not os.path.exists(model_save_path):
 
 FPATH_PERCEIVER = os.path.join(model_save_path, 'perceiversunmask_mnist_vq_{}.pth')
 FPATH_LOSSES = os.path.join(model_save_path, 'perceiversunmask_mnist_vq_losses_{}.npz')
-args = parse_flags()
 
 model = PerceiverSUNMASK(n_classes=n_classes,
                          z_index_dim=latent_length,
@@ -207,149 +177,42 @@ model = model.to(device)
 #logits, masks = self.perceiver(inputs, input_idxs, input_mask)
 print("Using device {}".format(device))
 
-def top_k_top_p_filtering(logits, top_k=0, top_p=0.0, filter_value=-1E9):
-    """ Filter a distribution of logits using top-k and/or nucleus (top-p) filtering
-        Args:
-            logits: logits distribution shape (..., vocabulary size)
-            top_k >0: keep only top k tokens with highest probability (top-k filtering).
-            top_p >0.0: keep the top tokens with cumulative probability >= top_p (nucleus filtering).
-    """
-    """
-        # calculate entropy
-        normalized = torch.nn.functional.log_softmax(logits, dim=-1)
-        p = torch.exp(normalized)
-        ent = -(normalized * p).sum(-1, keepdim=True)
-
-        #shift and sort
-        shifted_scores = torch.abs((-ent) - normalized)
-        _, sorted_indices = torch.sort(shifted_scores, descending=False)
-        sorted_logits = scores.gather(-1, sorted_indices)
-    """
-    top_k = min(top_k, logits.size(-1))  # Safety check
-    if top_k > 0:
-        # Remove all tokens with a probability less than the last token of the top-k
-        indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
-        logits[indices_to_remove] = filter_value
-
-    if top_p > 0.0:
-        sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-
-        cumulative_probs = torch.cumsum(torch.nn.functional.softmax(sorted_logits, dim=-1), dim=-1)
-      
-        # Remove tokens with cumulative probability above the threshold
-        sorted_indices_to_remove = cumulative_probs > top_p
-        sorted_indices_to_remove = sorted_indices_to_remove.long()
-
-        # Shift the indices to the right to keep also the first token above the threshold
-        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1]
-        sorted_indices_to_remove[..., 0] = 0
-
-        sorted_indices = torch.tensor(sorted_indices.cpu().data.numpy())
-        shp = logits.shape
-        logits_red = logits.reshape((-1, shp[-1]))
-        sorted_indices_red = sorted_indices.reshape((-1, shp[-1]))
-        sorted_indices_to_remove_red = sorted_indices_to_remove.reshape((-1, shp[-1]))
-        for i in range(shp[0]):
-            logits_red[i][sorted_indices_red[i]] = logits_red[i][sorted_indices_red[i]] * (1. - sorted_indices_to_remove_red[i]) + sorted_indices_to_remove_red[i] * filter_value
-        logits = logits_red.reshape(shp)
-    return logits
-
-
-def typical_top_k_filtering(logits, top_k=0, top_p=0.0, temperature=1.0, min_tokens_to_keep=1, filter_value=-1E12):
-    """ Filter a distribution of logits using typicality, with optional top-k and/or nucleus (top-p) filtering
-        Meister et. al. https://arxiv.org/abs/2202.00666
-        Args:
-            logits: logits distribution shape (..., vocabulary size)
-            top_k >0: keep top k tokens with highest prob (top-k filtering).
-            top_p >0.0: keep the top p tokens which compose cumulative probability mass top_p (nucleus filtering).
-            min_tokens_to_keep >=1: always keep at least this many tokens through the top_p / nucleus sampling
-    """
-    # https://arxiv.org/abs/2202.00666
-    # based on hugging face impl but added top k
-    # https://github.com/cimeister/typical-sampling/commit/0f24c9409dc078ed23982197e8af1439093eedd3#diff-cde731a000ec723e7224c8aed4ffdedc9751f5599fe0a859c5c65d0c5d94891dR249
-    # changed some of the scatter logic to looping + stacking due to spooky threaded cuda errors, need to CUDA_NONBLOCKING=1 to fix
-
-    # typical decoding
-    scores = logits
-    mass = top_p if top_p > 0.0 else 1.0
-    # calculate entropy
-    log_p = torch.nn.functional.log_softmax(scores, dim=-1)
-    p = torch.exp(log_p)
-    ent = -(p * log_p).sum(-1, keepdim=True)
-    # shift and sort
-    # abs(I() - H())
-    # I() is -log(p()) from eq 5
-    # so overall we see -log(p()) - ent
-    # orig code was ((-ent) - log_p) 
-    shifted_scores = torch.abs(-log_p - ent)
-
-    # possible to calculate the scores over k steps? ala classifier free guidance / CLIP guides?
-
-    # most typical (0) to least typical (high abs value)
-    _, sorted_indices = torch.sort(shifted_scores, descending=False, stable=True)
-    top_k = min(top_k, scores.size(-1) - 1)  # safety check that top k is not too large
-    # this semi-butchers some of the core arguments of the paper, but top k can be good
-    # think of this as doing typical decoding / reordering based on the top k by prob
-    # top k by typicality seems to be kinda weird for music?
-    #if top_k > 0:
-    #    topkval = torch.topk(scores, top_k)[0][..., -1, None]
-    #    indices_to_remove = scores < topkval
-    #    scores[indices_to_remove] = filter_value
-    if top_k > 0:
-        topkval = torch.topk(torch.max(shifted_scores) - shifted_scores, top_k)[0][..., -1, None]
-        indices_to_remove = (torch.max(shifted_scores) - shifted_scores) < topkval
-        scores[indices_to_remove] = filter_value
-   
-    sorted_scores = scores.gather(-1, sorted_indices)
-    cumulative_probs = sorted_scores.softmax(dim=-1).cumsum(dim=-1)
-    # Remove tokens once cumulative probability above the threshold
-    sorted_indices_to_remove = cumulative_probs > mass
-    sorted_indices_to_remove = sorted_indices_to_remove.long()
-    if min_tokens_to_keep > 1:
-        # Keep at least min_tokens_to_keep (set to min_tokens_to_keep-1 because we add the first one below)
-        sorted_indices_to_remove[..., : min_tokens_to_keep - 1] = 0
-    # Shift the indices to the right to keep also the first token above the threshold
-    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-    sorted_indices_to_remove[..., 0] = 0
-
-    sorted_indices = torch.tensor(sorted_indices.cpu().data.numpy())
-    shp = scores.shape
-    # not great cuda errors on gather calls here, rewrote to a "slow" version
-    scores_red = scores.reshape((-1, shp[-1]))
-    sorted_indices_red = sorted_indices.reshape((-1, shp[-1]))
-    sorted_indices_to_remove_red = sorted_indices_to_remove.reshape((-1, shp[-1]))
-    for i in range(shp[0]):
-        scores_red[i][sorted_indices_red[i]] = scores_red[i][sorted_indices_red[i]] * (1. - sorted_indices_to_remove_red[i]) + sorted_indices_to_remove_red[i] * filter_value
-    scores = scores_red.reshape(shp)
-    return scores
-
-
-def make_batch(batch, batch_matches, random_state, override_include_neighbors=None):
+def make_batch(batch, random_state, target_quadrant="A"):
     shp = batch.shape
-    # flatten from B 1 16 16 -> B 1 16*16
+    # target quadrant A = 0:14, 0:14
+    # target quadrant B = 0:14, 14:28
+    # target quadrant C = 14:28, 0:14
+    # target quadrant D = 14:28, 14:28
+
+    # flatten from B 1 28 28 -> B 1 14, 14 -> B 14*14
 
     # these are the main entries, and the targets
     bsize = shp[0]
-    batch = batch.reshape(bsize, 1, -1)
-    shp = batch_matches.shape
-    # these are all possible neighbors - we will choose n_neighbors_in_context of them randomly, in random order
-    batch_matches = batch_matches.reshape(bsize, shp[1], -1)
+    batch_A = batch[:, :, 0:8, 0:8].reshape((bsize, -1))
+    batch_B = batch[:, :, 0:8, 8:16].reshape((bsize, -1))
+    batch_C = batch[:, :, 8:16, 0:8].reshape((bsize, -1))
+    batch_D = batch[:, :, 8:16, 8:16].reshape((bsize, -1))
+    if target_quadrant == "A":
+        batch_complement = np.concatenate((batch_B, batch_C, batch_D), axis=-1)
+        batch = np.concatenate((batch_complement, batch_A), axis=-1)
+    elif target_quadrant == "B":
+        batch_complement = np.concatenate((batch_A, batch_C, batch_D), axis=-1)
+        batch = np.concatenate((batch_complement, batch_B), axis=-1)
+    elif target_quadrant == "C":
+        batch_complement = np.concatenate((batch_A, batch_B, batch_D), axis=-1)
+        batch = np.concatenate((batch_complement, batch_C), axis=-1)
+    elif target_quadrant == "D":
+        batch_complement = np.concatenate((batch_A, batch_B, batch_C), axis=-1)
+        batch = np.concatenate((batch_complement, batch_D), axis=-1)
+    else:
+        raise ValueError("Unknown target_quadrant specified for 'make_batch'")
 
-    n_inds = np.arange(n_neighbors)
-    batch_inds = [random_state.choice(n_inds, size=n_neighbors_in_context, replace=False) for _ in range(bsize)]
-    if override_include_neighbors is not None:
-        batch_inds = [np.array(override_include_neighbors) for _ in range(bsize)]
-
-    batch_matches_sub = np.concatenate([batch_matches[el, batch_inds[el]][None] for el in range(bsize)], axis=0)
-
-    # now the batch matches are the right size, we can concat and flatten
-    batch = np.concatenate((batch_matches_sub, batch), axis=1).reshape(bsize, -1)
     # batch is now B T format, with 3 context at front and target entry at the back
 
     # generate corresponding idx, we assume all entries "fill" measure, no 0 padding
     assert sequence_length == batch.shape[1]
     batch_idx = 0. * batch + np.arange(sequence_length)[None]
-    # batch now has correct shape overall, and is interleaved
+    # batch now has correct shape overall
     # swap to T, B format
     batch = batch.transpose(1, 0)
     batch_idx = batch_idx.transpose(1, 0).astype("int32")
@@ -362,6 +225,12 @@ def make_batch(batch, batch_matches, random_state, override_include_neighbors=No
     # sub 1 so targets are 0 : n_classes again
     targets = targets - 1
     return batch, batch_idx, targets
+
+"""
+tmp_random = np.random.RandomState(2122)
+(data, data_matches, batch_idx) = next(train_itr)
+batch, batch_idx, targets = make_batch(data, tmp_random, target_quadrant="A")
+"""
 
 gumbel_sampling_random_state = np.random.RandomState(3434)
 corruption_sampling_random_state = np.random.RandomState(1122)
@@ -392,49 +261,53 @@ def corrupt_pitch_mask(batch, mask, vocab_size):
 
 # SUNDAE https://arxiv.org/pdf/2112.06749.pdf
 def build_logits_fn(vocab_size, n_unrolled_steps, enable_sampling):
-    def logits_fn(input_batch, input_batch_idx, input_mask):
-        def fn(batch, batch_idx, mask):
-            logits, mask = model(batch, batch_idx, mask)
+    def logits_fn(input_batch, input_batch_idx, input_mask, input_mem_mask):
+        def fn(batch, batch_idx, mask, mem_mask):
+            logits = model(batch, batch_idx, mask, mem_mask)
             return logits
 
-        def unroll_fn(batch, batch_idx, mask):
+        def unroll_fn(batch, batch_idx, mask, mem_mask):
             # only corrupt query ones - this will break for uneven seq lengths!
             # +1 offset of batch to preserve 0 as a special token
             samples = corrupt_pitch_mask(batch[-latent_length:], mask, vocab_size)
-            samples = torch.concat([batch[:-latent_length], samples + 1], axis=0)
+            samples = torch.concat([batch[:-latent_length], samples], axis=0)
+
+            mem_samples = corrupt_pitch_mask(batch[:-latent_length], mem_mask[:-latent_length], vocab_size)
+            samples = torch.concat([mem_samples, samples[-latent_length:]], axis=0)
             all_logits = []
             for _ in range(n_unrolled_steps):
                 #ee = samples.cpu().data.numpy()
                 #print(ee.min())
                 #print(ee.max())
-                logits = fn(samples, batch_idx, mask)
+                logits = fn(samples, batch_idx, mask, mem_mask)
                 samples = gumbel_sample(logits).detach()
                 # sanity check to avoid issues with stacked outputs
                 assert samples.shape[1] == batch.shape[1]
                 # for the SUNDAE piece
                 samples = samples[:, :batch.shape[1]]
                 # add 1 to account for batch offset
-                samples = torch.concat([batch[:-latent_length], samples + 1], axis=0)
+                samples = torch.concat([mem_samples, samples + 1], axis=0)
                 all_logits += [logits[None]]
             final_logits = torch.cat(all_logits, dim=0)
             return final_logits
 
         if enable_sampling:
-            return fn(input_batch, input_batch_idx, input_mask)
+            return fn(input_batch, input_batch_idx, input_mask, input_mem_mask)
         else:
-            return unroll_fn(input_batch, input_batch_idx, input_mask)
+            return unroll_fn(input_batch, input_batch_idx, input_mask, input_mem_mask)
     return logits_fn
 
 def build_loss_fn(vocab_size, n_unrolled_steps=4):
     logits_fn = build_logits_fn(vocab_size, n_unrolled_steps, enable_sampling=False)
 
-    def local_loss_fn(batch, batch_idx, mask, targets):
+    def local_loss_fn(batch, batch_idx, mask, mem_mask, targets):
         # repeated targets are now n_unrolled_steps
+        # batch is T B F
+        batch_shp = batch.shape
         repeated_targets = torch.cat([targets[..., None]] * n_unrolled_steps, dim=1)
         # T N 1 -> N T 1
         repeated_targets = repeated_targets.permute(1, 0, 2)
         assert repeated_targets.shape[-1] == 1
-        bsize = batch.shape[1]
         # N T 1 -> N T P
 
         repeated_targets = F.one_hot(repeated_targets[..., 0].long(), num_classes=vocab_size)
@@ -443,7 +316,7 @@ def build_loss_fn(vocab_size, n_unrolled_steps=4):
         #    print([ind_to_vocab[int(e)] for e in t[i].cpu().data.numpy()])
         #print(mask)
 
-        logits = logits_fn(batch, batch_idx, mask)
+        logits = logits_fn(batch, batch_idx, mask, mem_mask)
         # S, T, N, P -> S, N, T, P
         logits = logits.permute(0, 2, 1, 3)
         out = logits.reshape(n_unrolled_steps * logits.shape[1], logits.shape[2], logits.shape[3])
@@ -465,7 +338,7 @@ def build_loss_fn(vocab_size, n_unrolled_steps=4):
 
         # Active mask sums up the amount that were inactive in time
         # downweighting more if more were not dropped out
-        reduced_loss = (reduced_mask_active * raw_comb_loss.view(n_unrolled_steps * bsize, latent_length, vocab_size)).sum(dim=-1)
+        reduced_loss = (reduced_mask_active * raw_comb_loss.view(n_unrolled_steps * batch_shp[1], latent_length, vocab_size)).sum(dim=-1)
         loss = torch.mean(reduced_loss, dim=1).mean()
         # upweight by average actives in T since the overall 
         # average penalty for mask weight reduction goes up the longer the sequence is?
@@ -791,8 +664,8 @@ elif args.task == 'train':
     _last_save = 0
     _last_show = 0
     for _n_train_steps_taken in range(n_train_steps):
-        (data, data_matches, batch_idx) = next(train_itr)
-        batch, batch_idx, targets = make_batch(data, data_matches, data_random_state)
+        (data, batch_idx) = next(train_itr)
+        batch, batch_idx, targets = make_batch(data, data_random_state, target_quadrant=args.quad)
         # bring in the SUNMASK loss, fix for flat sequnces / no reshape
 
         # mask is only latent_length long
@@ -802,12 +675,25 @@ elif args.task == 'train':
         C = (1. - C) # convert to 0 drop format
         C = C.astype(np.int32)
 
+        # mask for the memory portion
+        C_mem_prob = data_random_state.rand(batch.shape[1])
+        C_mem_mask_base = data_random_state.rand(batch.shape[0], batch.shape[1])
+        C_mem = 1 * (C_mem_mask_base < C_mem_prob[None, :])
+        C_mem = (1. - C_mem) # convert to 0 drop format
+        # set memory mask for target portion to match
+        C_mem[-latent_length:] = np.copy(C[-latent_length:])
+        # can set this mask to all keep for testing...
+        C_mem = C_mem.astype(np.int32)
+        #C_mem = C_mem * 0 + 1
+        C_mem[-latent_length:] = np.copy(C[-latent_length:])
+
         x = torch.tensor(batch).type(torch.FloatTensor).to(device)
         x_idx = torch.tensor(batch_idx).type(torch.FloatTensor).to(device)
         targets = torch.tensor(targets).type(torch.FloatTensor).to(device)
         C2 = torch.tensor(C).type(torch.FloatTensor).to(device)
+        C2_mem = torch.tensor(C_mem).type(torch.FloatTensor).to(device)
 
-        loss = u_loss_fn(x, x_idx, C2, targets)
+        loss = u_loss_fn(x, x_idx, C2, C2_mem, targets)
         losses.append(loss.item())
         loss.backward()
         clipping_grad_value_(model.parameters(), clip_grad)
@@ -822,8 +708,8 @@ elif args.task == 'train':
             model.eval()
             for _s in range(valid_steps_per):
                 with torch.no_grad():
-                    (data, data_matches, batch_idx) = next(valid_itr)
-                    batch, batch_idx, targets = make_batch(data, data_matches, data_random_state)
+                    (data, batch_idx) = next(valid_itr)
+                    batch, batch_idx, targets = make_batch(data, data_random_state, target_quadrant=args.quad)
 
                     # mask is only latent_length long
                     C_prob = data_random_state.rand(batch.shape[1])
@@ -832,12 +718,25 @@ elif args.task == 'train':
                     C = (1. - C) # convert to 0 drop format
                     C = C.astype(np.int32)
 
+                    # mask for the memory portion
+                    C_mem_prob = data_random_state.rand(batch.shape[1])
+                    C_mem_mask_base = data_random_state.rand(batch.shape[0], batch.shape[1])
+                    C_mem = 1 * (C_mem_mask_base < C_mem_prob[None, :])
+                    C_mem = (1. - C_mem) # convert to 0 drop format
+                    # set memory mask for target portion to match
+                    C_mem[-latent_length:] = np.copy(C[-latent_length:])
+                    # can set this mask to all keep for testing...
+                    C_mem = C_mem.astype(np.int32)
+                    #C_mem = C_mem * 0 + 1
+                    C_mem[-latent_length:] = np.copy(C[-latent_length:])
+
                     x = torch.tensor(batch).type(torch.FloatTensor).to(device)
                     x_idx = torch.tensor(batch_idx).type(torch.FloatTensor).to(device)
                     targets = torch.tensor(targets).type(torch.FloatTensor).to(device)
                     C2 = torch.tensor(C).type(torch.FloatTensor).to(device)
+                    C2_mem = torch.tensor(C_mem).type(torch.FloatTensor).to(device)
 
-                    loss = u_loss_fn(x, x_idx, C2, targets)
+                    loss = u_loss_fn(x, x_idx, C2, C2_mem, targets)
 
                     valid_losses.append(loss.item())
                     # carryover
@@ -846,17 +745,18 @@ elif args.task == 'train':
             _new_time = time.time()
             _last_show = _n_train_steps_taken
             print('step {}'.format(_n_train_steps_taken))
+            print('quad {}'.format(args.quad))
             print('train loss avg (past 5k): ', np.mean(losses[-5000:]))
             print('valid loss avg (past 5k): ', np.mean(valid_losses[-5000:]))
             print('approx time (sec) per step (ignoring save time): ', ((_new_time - _last_time) - _save_time) / float(show_every))
             print('approx time (sec) per step (including save time): ', ((_new_time - _last_time) / float(show_every)))
             plt.plot(losses)
             plt.plot(valid_losses)
-            plt.savefig("perceiversunmask_train_losses.png")
+            plt.savefig(model_save_path + os.sep + "perceiversunmask_train_losses_quad_{}.png".format(_n_train_steps_taken))
             plt.close('all')
             plt.plot(losses[-5000:])
             plt.plot(valid_losses[-5000:])
-            plt.savefig("perceiversunmask_train_losses_recent.png")
+            plt.savefig(model_save_path + os.sep + "perceiversunmask_train_losses_recent_quad_{}.png".format(_n_train_steps_taken))
             plt.close('all')
             _last_time = time.time()
             _save_time = 0
