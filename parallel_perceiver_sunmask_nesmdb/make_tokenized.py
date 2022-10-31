@@ -105,6 +105,10 @@ rev_pitch_tokens_tr = {v: k for k, v in pitch_tokens_tr.items()}
 assert all([v not in pitch_tokens_p1.values() for v in pitch_tokens_p2.values()])
 assert all([v not in pitch_tokens_p2.values() for v in pitch_tokens_tr.values()])
 
+# useful for the model
+pitch_n_classes = pitch_offset + pitch_range * 3
+dur_n_classes = n_bins * 4 + dur_offset
+
 
 # we will want to also get some information about the normal length to setup models?
 def stringmidi_to_tokenized(miditxt_fp):
@@ -219,8 +223,8 @@ if __name__ == "__main__":
         print("processing {}".format(x), flush=True)
         return stringmidi_to_tokenized(x)
 
-    fpath = "out_nesmdb_song_str/valid_293_Shinobi_08_09BossBGM2.mid.txt"
-    all_files = [fpath]
+    #fpath = "out_nesmdb_song_str/valid_293_Shinobi_08_09BossBGM2.mid.txt"
+    #all_files = [fpath]
     """
     # check multiprocessing for debug
     results = []

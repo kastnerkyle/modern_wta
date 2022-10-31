@@ -7,9 +7,11 @@ import matplotlib.pyplot as plt
 import multiprocessing
 from collections import defaultdict
 # this will import the tokenization settings
+import os
 import tempfile
 import pretty_midi
 from make_tokenized import *
+from IPython import embed; embed(); raise ValueError()
 
 def detokenize(events):
     event_list = []
@@ -91,13 +93,6 @@ def real_events_to_midi(real_events):
     # if we get to here the unification worked
     zip_events = list([(el1, el2) for el1, el2 in zip(no_notes_durs, no_notes)])
 
-    # simulate randomly cutting in for batch loader?
-    cut_points = [n for n, tup in enumerate(zip_events) if "WT" in tup[0]]
-    # example of how to randomly slice
-    #rand_cut = np.random.RandomState(4142)
-    #slice_ind = rand_cut.choice(cut_points)
-    #zip_events = zip_events[slice_ind:]
-
     samp = 0
     for z_e in zip_events:
         note_half, dur_half = z_e[0], z_e[1]
@@ -130,15 +125,48 @@ def real_events_to_midi(real_events):
     midi.time_signature_changes.append(eos)
     return midi
 
-
 # listen to example after inverting tokenization
 fpath = "tokenized_nesmdb_song_str/tokenized_p0_1-00_valid_293_Shinobi_08_09BossBGM2.mid.txt"
 with open(fpath, "r") as file_handle:
     l = file_handle.read()
 tokenized_events = l.split("\n")
 
-real_events = detokenize(tokenized_events)
+"""
+# simulate randomly cutting in for batch loader?
+cut_length = 1024
+cut_points = [n for n, el in enumerate(tokenized_events) if "WT" in el and (n + cut_length < len(tokenized_events))]
+# example of how to randomly slice
+rand_cut = np.random.RandomState(4142)
+slice_ind = rand_cut.choice(cut_points)
+cut_events = tokenized_events[slice_ind:slice_ind + cut_length]
+real_events = detokenize(cut_events)
 midi_res = real_events_to_midi(real_events)
 midi_res.write("tmp.mid")
+"""
+
+all_files = []
+filesdir = "tokenized_nesmdb_song_str"
+all_files.extend(sorted([filesdir + os.sep + f for f in os.listdir(filesdir)]))
+def _read_task(fpath):
+    print("processing", fpath)
+    with open(fpath, "r") as file_handle:
+        l = file_handle.read()
+        tokenized_events = l.split("\n")
+    return len(tokenized_events)
+
+n_processes = multiprocessing.cpu_count() - 1
+with multiprocessing.Pool(n_processes) as p:
+    r = [el for el in p.imap_unordered(_read_task, all_files)]
+all_files_lens = r
+
+n_bins = 100
+#hist, bins = np.histogram(all_files_lens, bins=n_bins)
+#logbins = np.logspace(np.log10(bins[0]), np.log10(bins[-1]),len(bins))
+#plt.hist(all_files_lens, bins=logbins, log=True)
+plt.hist(all_files_lens, bins=n_bins, log=True)
+#plt.xscale('log')
+plt.savefig("float_length_hist.png")
+plt.close()
 from IPython import embed; embed(); raise ValueError()
+
 
