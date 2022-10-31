@@ -946,10 +946,17 @@ class PerceiverSUNMASK(nn.Module):
         self.dtype = get_dtype_default()
         self.device = get_device_default()
         self._n_classes = n_classes
+        self._n_classes_embed = n_classes
         if query_n_classes == None:
             self._query_n_classes = n_classes
+            self._query_n_classes_embed = n_classes
         else:
+            # use max of the 2 for embedding because of the input structure (embeds then masks after)
             self._query_n_classes = query_n_classes
+            self._query_n_classes_embed = max(n_classes, query_n_classes)
+
+            self._n_classes = n_classes
+            self._n_classes_embed = max(n_classes, query_n_classes)
         self._input_embed_dim = input_embed_dim
         self._num_z_channels = num_z_channels
         self._inner_expansion_dim = inner_expansion_dim
@@ -972,13 +979,13 @@ class PerceiverSUNMASK(nn.Module):
         self.g.manual_seed(self._init_generator_seed)
 
         # input has +1 due to shift/offset of 1 in batch processing (to allow for 0 to denote masked length)
-        self.input_embed = EmbeddingDropout(self._n_classes + 1 + 1, self._input_embed_dim // 2,
+        self.input_embed = EmbeddingDropout(self._n_classes_embed + 1 + 1, self._input_embed_dim // 2,
                                      dropout_keep_prob=self._input_dropout_keep_prob,
                                      random_state=self._init_random_state,
                                      device=self.device,
                                      dtype=self.dtype)
         # div 2 because of sunmask
-        self.input_query_embed = Embedding(self._query_n_classes + 1 + 1, self._input_embed_dim // 2,
+        self.input_query_embed = Embedding(self._query_n_classes_embed + 1 + 1, self._input_embed_dim // 2,
                                      random_state=self._init_random_state,
                                      device=self.device,
                                      dtype=self.dtype)

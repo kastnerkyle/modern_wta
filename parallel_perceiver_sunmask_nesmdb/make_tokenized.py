@@ -106,7 +106,7 @@ assert all([v not in pitch_tokens_p1.values() for v in pitch_tokens_p2.values()]
 assert all([v not in pitch_tokens_p2.values() for v in pitch_tokens_tr.values()])
 
 # useful for the model
-pitch_n_classes = pitch_offset + pitch_range * 3
+pitch_n_classes = pitch_range * 3 + pitch_offset
 dur_n_classes = n_bins * 4 + dur_offset
 
 
