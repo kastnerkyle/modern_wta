@@ -749,19 +749,11 @@ if True:
     data_random_state = np.random.RandomState(5544 + _offset)
     model.reset_generator()
 
-    temperature_to_test = .1
-    # temp .1 steps 10 n reps final mask to test 1
-    # keep to test .2
-    # topk 0 
-    # topp 0
-    # [0, 1, 3]
-    # typical False gives "creative" digits
-    steps_to_test = 10 #.01 * int(latent_length)
+    temperature_to_test = .01
+    steps_to_test = 100
     n_reps_per_mask_to_test = 1
     n_reps_final_mask_dwell_to_test = 0
-    #keep_to_test = .01 # .01 k = 1 makes weird symbols
-    keep_to_test = .33 #1.0 #1.0 #1.0 #- .005
-    # top k 1 will cause it to make novel digits
+    keep_to_test = .33
     top_k_to_test = 0
     top_p_to_test = 0.0
     seed_offset_to_test = 7951
@@ -782,12 +774,6 @@ if True:
     decay_schedule = "linear"
 
     tmp_random = np.random.RandomState(2122)
-    (data, batch_idx) = next(test_itr)
-    # cut it to 2 to match internals
-    data = data[:2]
-    # randomize?
-    data = 0. * data
-
     def make_quad_A(data, target_quadrant="A"):
         return make_batch(data, tmp_random, target_quadrant=target_quadrant)
 
@@ -844,9 +830,27 @@ if True:
                 "C": None,
                 "D": None}
 
+    (data, batch_idx) = next(test_itr)
+    # cut it to 2 to match internals
+    data = data[:2]
+
+    # all 0 makes a 5
+    data = 0. * data
+    # 0 to 6
+    #init_random_state = np.random.RandomState(4321)
+    # 9
+    #init_random_state = np.random.RandomState(41)
+    init_random_state = np.random.RandomState(47)
+    data = data + init_random_state.randint(0, 512, size=data.shape)
+
+    global_intermediate_x = []
+    loop_random = np.random.RandomState(1274)
+
     while continue_loop:
         print("par_loops", par_loops)
-        for model_quad in ["A", "B", "C", "D"]:
+        this_list = ["A", "B", "C", "D"]
+        loop_random.shuffle(this_list)
+        for model_quad in this_list:
             if par_loops == 0:
                 ret_gen_Q = torch_paryield_diffuse_perceiversunmask(batch_fns[model_quad],
                                                                     models[model_quad],
@@ -878,12 +882,13 @@ if True:
                 from IPython import embed; embed(); raise ValueError()
             new_data = batch_to_data(ret_Q, model_quad)
             data = np.copy(new_data)
+            global_intermediate_x.append(data)
 
         par_loops += 1
         if not_finished:
             continue_loop = True
         else:
-            if model_quad == "D":
+            if model_quad == this_list[-1]:
                 continue_loop = False
 
     # use 0th example
@@ -918,7 +923,21 @@ if True:
     plt.imshow(out_im[0, 0])
     plt.savefig("tmp.png")
     plt.close()
+
+    # intermediates 
+    inter_batch = np.concatenate([x_i[0][None] for x_i in global_intermediate_x])[:, 0]
+    code_tmp = conv_model.vq_indices_to_codes(torch.tensor(inter_batch).long().to(device))
+    out_code = conv_model.decode(code_tmp).detach().cpu().data.numpy()
+    out_im = sigmoid_np(out_code)
+    out_dir = "gif_out_dir"
+    if not os.path.exists(out_dir):
+        os.mkdir(out_dir)
+    for _i in range(out_im.shape[0]):
+        print(_i)
+        plt.imshow(out_im[_i, 0])
+        plt.savefig(out_dir + os.sep + "pic{:04d}.png".format(_i))
     from IPython import embed; embed(); raise ValueError()
+
     # encode full batch, save and store
     context0_pred = (out_pred).cpu().data.numpy().astype("int32")[0 * latent_length:1 * latent_length].transpose(1, 0).reshape(-1, 16, 16)
     context1_pred = (out_pred).cpu().data.numpy().astype("int32")[1 * latent_length:2 * latent_length].transpose(1, 0).reshape(-1, 16, 16)
