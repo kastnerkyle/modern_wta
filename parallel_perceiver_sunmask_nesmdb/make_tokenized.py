@@ -143,12 +143,29 @@ def stringmidi_to_tokenized(miditxt_fp):
     # lets spawn 50 clones of each song? with +- 5% timing variation
     # do fixed from -5 to +5?
     # LakhNES does this a fancy way but we are already quantizing to buckets... meh
-    n_augments = 10
-    z_1 = np.random.uniform(size=n_augments + 1)
+    n_augments_to_try = 100
+    z_1 = np.random.uniform(size=n_augments_to_try + 1)
     # now .95 to 1.05
     timing_augments = 1 + (.1 * z_1 - .05)
     # guarantee 1 timing is always the original
     timing_augments[-1] = 1.
+
+    # we always start with 1
+    timing_augments_final = [1.]
+    # we do this to avoid nasty edge case of multiple processes writing to the same file... ouch
+    timing_str_fnames = {"{:0.4f}".format(1.): None}
+
+    # now we shrink the candidate pool down to unique string values...
+    # if this fails as an edge case, we still won't get name clashes for file write
+    # just less versions of that specific file
+    desired_size = 11
+    for t_a in timing_augments:
+        str_t_a = "{:0.4f}".format(t_a)
+        if str_t_a not in timing_str_fnames:
+            timing_augments_final.append(t_a)
+            timing_str_fnames[str_t_a] = None
+        if len(timing_augments_final) >= desired_size:
+            break
 
     token_augment_seqs = []
     for t_a in timing_augments:
@@ -250,7 +267,7 @@ if __name__ == "__main__":
         # already has .txt on it
         p_m = "p" if int(p_a) >= 0 else "m"
         p_a_str = p_m + str(abs(int(p_a)))
-        t_a_str = "{:0.2f}".format(t_a)
+        t_a_str = "{:0.4f}".format(t_a)
         t_a_str = t_a_str.replace(".", "-")
         f_lcl = out_dir + os.sep + "tokenized_" + p_a_str + "_" + t_a_str + "_" + f.split("/")[-1]
         print("writing", f_lcl)
