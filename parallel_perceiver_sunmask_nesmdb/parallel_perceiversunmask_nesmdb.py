@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 import os
 import imageio
 import copy
+import psutil
 import random
 from collections import OrderedDict
 import pretty_midi
@@ -95,6 +96,8 @@ filesdir = "tokenized_nesmdb_song_str"
 #all_files.extend(sorted([filesdir + os.sep + f for f in os.listdir(filesdir)]))
 start_time = time.time()
 print("running initial file count with dircnt to cache for efficiency")
+print("if this is slow, kill the script, and run this command manually")
+print("~/dircnt {}".format(filesdir))
 os.system("~/dircnt {}".format(filesdir))
 # do a system call to dircnt 
 all_files = [filesdir + os.sep + f.name for f in os.scandir(filesdir)]
@@ -156,79 +159,92 @@ dur_class_map["</s>"] = 1
 memmap_paths = ["train_tok_pitch.memmap", "train_tok_dur.memmap",
                 "valid_tok_pitch.memmap", "valid_tok_dur.memmap",
                 "test_tok_pitch.memmap", "test_tok_dur.memmap"]
-if not all([os.path.exists(p) for p in memmap_paths]):
-    # hack so we can test caching :(
-    print("upfront process to create cache")
+if not all([os.path.exists(memp) for memp in memmap_paths]):
+    def _write_memmap(filepaths):
+        for _n, this_file in enumerate(filepaths):
+            if (_n > 1000) and (_n % 1000 == 0):
+                pct = psutil.virtual_memory().percent
+                if pct > 85:
+                    print("Slowing way down to try and let the system catch up on cached writes... memory growing aggressively")
+                    print("Sleeping process for 30s...")
+                    time.sleep(30)
+            # can manually append to each file...
+            # extra \0 at the very end
+            # TODO: support restart / continuation?
+            if this_file == filepaths[-1]:
+                extra_tag = "\0"
+            else:
+                extra_tag = ""
+            all_tokenized_tups = [el for el in map(_read_task, [this_file])]
+            #r = [el for el in map(_read_task, all_files)]
+            #all_tokenized_tups = r
+            #print("time to process files", stop_time - start_time)
 
-    n_processes = max(1, multiprocessing.cpu_count() // 2 - 1)
+            # shouldn't have conflices here
+            train_tokenized_seqs = [el for name, el in all_tokenized_tups if "_train_" in name]
+            valid_tokenized_seqs = [el for name, el in all_tokenized_tups if "_valid_" in name]
+            test_tokenized_seqs = [el for name, el in all_tokenized_tups if "_test_" in name]
+            del all_tokenized_tups
+            if len(train_tokenized_seqs) != 0:
+                train_split_seqs = [split_process_and_assert(t_i) for t_i in train_tokenized_seqs]
+
+                train_split_seqs_pitch = [train_split_seqs[_ii][0] for _ii in range(len(train_tokenized_seqs))]
+                train_split_seqs_dur = [train_split_seqs[_ii][1] for _ii in range(len(train_tokenized_seqs))]
+
+                train_pitch_str = "\0".join(["\n".join([str(el_i) for el_i in el]) for el in train_split_seqs_pitch]) + extra_tag
+                train_dur_str = "\0".join(["\n".join([str(el_i) for el_i in el]) for el in train_split_seqs_dur]) + extra_tag
+                with open("train_tok_pitch.memmap", "a") as file_handle:
+                    file_handle.write(train_pitch_str)
+                with open("train_tok_dur.memmap", "a") as file_handle:
+                    file_handle.write(train_dur_str)
+            elif len(valid_tokenized_seqs) != 0:
+                valid_split_seqs = [split_process_and_assert(t_i) for t_i in valid_tokenized_seqs]
+
+                valid_split_seqs_pitch = [valid_split_seqs[_ii][0] for _ii in range(len(valid_tokenized_seqs))]
+                valid_split_seqs_dur = [valid_split_seqs[_ii][1] for _ii in range(len(valid_tokenized_seqs))]
+
+                valid_pitch_str = "\0".join(["\n".join([str(el_i) for el_i in el]) for el in valid_split_seqs_pitch]) + extra_tag
+                valid_dur_str = "\0".join(["\n".join([str(el_i) for el_i in el]) for el in valid_split_seqs_dur]) + extra_tag
+                with open("valid_tok_pitch.memmap", "a") as file_handle:
+                    file_handle.write(valid_pitch_str)
+                with open("valid_tok_dur.memmap", "a") as file_handle:
+                    file_handle.write(valid_dur_str)
+            else:
+                assert len(train_tokenized_seqs) == 0
+                assert len(valid_tokenized_seqs) == 0
+                test_split_seqs = [split_process_and_assert(t_i) for t_i in test_tokenized_seqs]
+
+                test_split_seqs_pitch = [test_split_seqs[_ii][0] for _ii in range(len(test_tokenized_seqs))]
+                test_split_seqs_dur = [test_split_seqs[_ii][1] for _ii in range(len(test_tokenized_seqs))]
+
+                test_pitch_str = "\0".join(["\n".join([str(el_i) for el_i in el]) for el in test_split_seqs_pitch]) + extra_tag
+                test_dur_str = "\0".join(["\n".join([str(el_i) for el_i in el]) for el in test_split_seqs_dur]) + extra_tag
+                with open("test_tok_pitch.memmap", "a") as file_handle:
+                    file_handle.write(test_pitch_str)
+                with open("test_tok_dur.memmap", "a") as file_handle:
+                    file_handle.write(test_dur_str)
+    # process for each train val test
+    print("Starting multiprocessing jobs")
     start_time = time.time()
+    # parallelize train valid and test... 3x speedup
+    train_files = [el for el in all_files if "_train_" in el]
+    valid_files = [el for el in all_files if "_valid_" in el]
+    test_files = [el for el in all_files if "_test_" in el]
+    """
     with multiprocessing.Pool(n_processes) as p:
         r = [el for el in p.imap_unordered(_read_task, all_files)]
-    all_tokenized_tups = r
+    """
+    n_processes = 3
+    with multiprocessing.Pool(n_processes) as p:
+        # let each process inspect the pool so we can wait a bit on processing if the cache gets big...
+        p.imap_unordered(_write_memmap, [train_files, valid_files, test_files])
+        p.close()
+        p.join()
     stop_time = time.time()
-    print("time to process files", stop_time - start_time)
-
-    train_tokenized_seqs = [el for name, el in all_tokenized_tups if "_train_" in name]
-    valid_tokenized_seqs = [el for name, el in all_tokenized_tups if "_valid_" in name]
-    test_tokenized_seqs = [el for name, el in all_tokenized_tups if "_test_" in name]
-    del all_tokenized_tups
-
-    """
-    train_tokenized_seqs = [el for name, el in all_tokenized_tups if "_train_" in name]
-    train_str = "\0".join(["\n".join(el) for el in train_tokenized_seqs]) + "\0"
-    with open("train_tok.memmap", "w") as file_handle:
-        file_handle.write(train_str)
-
-    valid_tokenized_seqs = [el for name, el in all_tokenized_tups if "_valid_" in name]
-    valid_str = "\0".join(["\n".join(el) for el in valid_tokenized_seqs]) + "\0"
-    with open("valid_tok.memmap", "w") as file_handle:
-        file_handle.write(valid_str)
-
-    test_tokenized_seqs = [el for name, el in all_tokenized_tups if "_test_" in name]
-    test_str = "\0".join(["\n".join(el) for el in test_tokenized_seqs]) + "\0"
-    with open("test_tok.memmap", "w") as file_handle:
-        file_handle.write(test_str)
-    """
-    # map to integers all at once for easier data itr processing...
-    # pitch, dur
-    train_split_seqs = [split_process_and_assert(t_i) for t_i in train_tokenized_seqs]
-    del train_tokenized_seqs
-    valid_split_seqs = [split_process_and_assert(t_i) for t_i in valid_tokenized_seqs]
-    del valid_tokenized_seqs
-    test_split_seqs = [split_process_and_assert(t_i) for t_i in test_tokenized_seqs]
-    del test_tokenized_seqs
-
-    train_split_seqs_pitch = [train_split_seqs[_ii][0] for _ii in range(len(train_tokenized_seqs))]
-    train_split_seqs_dur = [train_split_seqs[_ii][1] for _ii in range(len(train_tokenized_seqs))]
-    del train_tokenized_seqs
-    train_pitch_str = "\0".join(["\n".join([str(el_i) for el_i in el]) for el in train_split_seqs_pitch]) + "\0"
-    train_dur_str = "\0".join(["\n".join([str(el_i) for el_i in el]) for el in train_split_seqs_dur]) + "\0"
-    with open("train_tok_pitch.memmap", "w") as file_handle:
-        file_handle.write(train_pitch_str)
-    with open("train_tok_dur.memmap", "w") as file_handle:
-        file_handle.write(train_dur_str)
-
-    valid_split_seqs_pitch = [valid_split_seqs[_ii][0] for _ii in range(len(valid_tokenized_seqs))]
-    valid_split_seqs_dur = [valid_split_seqs[_ii][1] for _ii in range(len(valid_tokenized_seqs))]
-    del valid_tokenized_seqs
-    valid_pitch_str = "\0".join(["\n".join([str(el_i) for el_i in el]) for el in valid_split_seqs_pitch]) + "\0"
-    valid_dur_str = "\0".join(["\n".join([str(el_i) for el_i in el]) for el in valid_split_seqs_dur]) + "\0"
-    with open("valid_tok_pitch.memmap", "w") as file_handle:
-        file_handle.write(valid_pitch_str)
-    with open("valid_tok_dur.memmap", "w") as file_handle:
-        file_handle.write(valid_dur_str)
-
-    test_split_seqs_pitch = [test_split_seqs[_ii][0] for _ii in range(len(test_tokenized_seqs))]
-    test_split_seqs_dur = [test_split_seqs[_ii][1] for _ii in range(len(test_tokenized_seqs))]
-    del test_tokenized_seqs
-    test_pitch_str = "\0".join(["\n".join([str(el_i) for el_i in el]) for el in test_split_seqs_pitch]) + "\0"
-    test_dur_str = "\0".join(["\n".join([str(el_i) for el_i in el]) for el in test_split_seqs_dur]) + "\0"
-    with open("test_tok_pitch.memmap", "w") as file_handle:
-        file_handle.write(test_pitch_str)
-    with open("test_tok_dur.memmap", "w") as file_handle:
-        file_handle.write(test_dur_str)
+    print("total time to parse and create memmap blobs,", stop_time - start_time)
 
 print("memmap from saved cache")
+# reading back into memory... probably could rewrite to just use the memmap but it should fit in mem
 train_pitch_blob = IndexedBlob("train_tok_pitch.memmap")
 train_pitch_blob_indices = list(range(0, len(train_pitch_blob.indices) - 1))
 train_dur_blob = IndexedBlob("train_tok_dur.memmap")
