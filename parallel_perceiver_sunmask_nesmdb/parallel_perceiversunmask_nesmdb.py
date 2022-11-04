@@ -1,6 +1,4 @@
-# Find MIDIs
 import glob
-# Pick a random one
 import random
 import numpy as np
 import pretty_midi
@@ -20,8 +18,10 @@ import copy
 import psutil
 import random
 from collections import OrderedDict
-import pretty_midi
+from collections import defaultdict
 import multiprocessing
+from fractions import Fraction
+from collections import defaultdict
 from parallel_perceiversunmask_nesmdb_models import PerceiverSUNMASK, clipping_grad_value_, RampOpt
 
 def seed_everything(seed=1234):
@@ -44,7 +44,6 @@ def seed_everything(seed=1234):
 # from jalexvig
 def parse_flags():
     import argparse
-
     parser = argparse.ArgumentParser()
     parser.add_argument('--task', default='notes_target', choices=['notes_target','durs_target'], help='Task to do.')
     args = parser.parse_args()
@@ -59,67 +58,410 @@ if args.task not in ["notes_target", "durs_target"]:
     print(args)
     raise ValueError("Invalid task passes to launch args")
 
-class IndexedBlob:
-    # https://stackoverflow.com/questions/51181556/whats-the-fastest-way-to-save-load-a-large-collection-list-set-of-strings-in
-    def __init__(self, filename):
-        index_filename = filename + '.index'
-        blob = np.memmap(filename, mode='r')
+# do all preproc in here, comment it later
+def instrument_is_monophonic(ins):
+    # Ensure sorted
+    notes = ins.notes
+    last_note_start = -1
+    for n in notes:
+        assert n.start >= last_note_start
+        last_note_start = n.start
 
-        try:
-            # if there is an existing index
-            indices = np.memmap(index_filename, dtype='>i8', mode='r')
-        except FileNotFoundError:
-            # else, create it
-            indices, = np.where(blob == ord('\0'))
-            # force dtype to predictable file
-            indices = np.array(indices, dtype='>i8')
-            with open(index_filename, 'wb') as f:
-                # add a virtual newline
-                np.array(-1, dtype='>i8').tofile(f)
-                indices.tofile(f)
-            # then reopen it as a file to reduce memory
-            # (and also pick up that -1 we added)
-            indices = np.memmap(index_filename, dtype='>i8', mode='r')
+    monophonic = True
+    for i in range(len(notes) - 1):
+       n0 = notes[i]
+       n1 = notes[i + 1]
+       if n0.end > n1.start:
+           monophonic = False
+           break
+    return monophonic
 
-        self.blob = blob
-        self.indices = indices
 
-    def __getitem__(self, line):
-        assert line >= 0
+def midi_to_string(midi_fp):
+    # use preprocessing from LakhNES
+    # https://github.com/chrisdonahue/LakhNES/blob/master/data/adapt_lakh_to_nes.py
+    min_num_instruments = 3
+    filter_mid_len_below_seconds = 5.
+    filter_mid_len_above_seconds = 600.
+    filter_ins_max_below = 21
+    filter_ins_min_above = 108
+    filter_mid_bad_times = True
+    filter_ins_duplicate = True
+    # Ignore unusually large MIDI files (only ~25 of these in the dataset)
+    if os.path.getsize(midi_fp) > (512 * 1024): #512K
+        return
 
-        lo = self.indices[line] + 1
-        hi = self.indices[line + 1]
+    try:
+        midi = pretty_midi.PrettyMIDI(midi_fp)
+    except:
+        return
 
-        return self.blob[lo:hi].tobytes().decode()
+      # Filter MIDIs with extreme length
+    midi_len = midi.get_end_time()
+    if midi_len < filter_mid_len_below_seconds or midi_len > filter_mid_len_above_seconds:
+        return
 
-filesdir = "tokenized_nesmdb_song_str"
-#all_files.extend(sorted([filesdir + os.sep + f for f in os.listdir(filesdir)]))
-start_time = time.time()
-print("running initial file count with dircnt to cache for efficiency")
-print("if this is slow, kill the script, and run this command manually")
-print("~/dircnt {}".format(filesdir))
-os.system("~/dircnt {}".format(filesdir))
-# do a system call to dircnt 
-all_files = [filesdir + os.sep + f.name for f in os.scandir(filesdir)]
-stop_time = time.time()
-all_files = sorted(all_files)
-print("time to read files", stop_time - start_time)
+    # Filter out negative times and quantize to audio samples
+    for ins in midi.instruments:
+        for n in ins.notes:
+            if filter_mid_bad_times:
+                if n.start < 0 or n.end < 0 or n.end < n.start:
+                      return
+            n.start = round(n.start * 44100.) / 44100.
+            n.end = round(n.end * 44100.) / 44100.
 
-"""
-# hack this to get a few to debug load
-sz = 100
-train_fpaths = [el for el in all_files if "_train_" in el][:sz]
-valid_fpaths = [el for el in all_files if "_valid_" in el][:sz]
-test_fpaths = [el for el in all_files if "_test_" in el][:sz]
-all_files = train_fpaths + valid_fpaths + test_fpaths
-"""
+    instruments = midi.instruments
 
-def _read_task(fpath):
-    print("processing", fpath, flush=True)
-    with open(fpath, "r") as file_handle:
-        l = file_handle.read()
-        tokenized_events = l.split("\n")
-    return (fpath, tokenized_events)
+    # Filter out drum instruments
+    drums = [i for i in instruments if i.is_drum]
+    instruments = [i for i in instruments if not i.is_drum]
+
+    # Filter out instruments with bizarre ranges
+    instruments_normal_range = []
+    for ins in instruments:
+        pitches = [n.pitch for n in ins.notes]
+        min_pitch = min(pitches)
+        max_pitch = max(pitches)
+        if max_pitch >= filter_ins_max_below and min_pitch <= filter_ins_min_above:
+           instruments_normal_range.append(ins)
+    instruments = instruments_normal_range
+    if len(instruments) < min_num_instruments:
+        return
+
+    # Sort notes for polyphonic filtering and proper saving
+    for ins in instruments:
+        ins.notes = sorted(ins.notes, key=lambda x: x.start)
+
+    # Filter out polyphonic instruments
+    instruments = [i for i in instruments if instrument_is_monophonic(i)]
+    if len(instruments) < min_num_instruments:
+        return
+
+    # Filter out duplicate instruments
+    if filter_ins_duplicate:
+        uniques = set()
+        instruments_unique = []
+        for ins in instruments:
+            pitches = ','.join(['{}:{:.1f}'.format(str(n.pitch), n.start) for n in ins.notes])
+            if pitches not in uniques:
+                instruments_unique.append(ins)
+                uniques.add(pitches)
+        instruments = instruments_unique
+        if len(instruments) < min_num_instruments:
+            return
+
+    # forget the music21 games
+    pretty_midi.pretty_midi.MAX_TICK = 1e16
+
+    ins_names = ['p1', 'p2', 'tr', 'no']
+    instruments = sorted(midi.instruments, key=lambda x: ins_names.index(x.name))
+    samp_to_events = defaultdict(list)
+    for ins in instruments:
+        instag = ins.name.upper()
+        if instag == "NO":
+            continue
+
+        last_start = -1
+        last_end = -1
+        last_pitch = -1
+        for note in ins.notes:
+            start = (note.start * 44100) + 1e-6
+            end = (note.end * 44100) + 1e-6
+
+            assert start - int(start) < 1e-3
+            assert end - int(end) < 1e-3
+
+            start = int(start)
+            end = int(end)
+
+            assert start > last_start
+            assert start >= last_end
+
+            pitch = note.pitch
+
+            # reformat as DUR
+
+            if last_end >= 0 and last_end != start:
+                samp_to_events[last_end].append('{}_NOTEOFF'.format(instag))
+                samp_to_events[last_start].append('{}_{}_DUR_{}'.format(instag, last_start, last_end - last_start))
+            elif last_end == start:
+                samp_to_events[last_start].append('{}_{}_DUR_{}'.format(instag, last_start, last_end - last_start))
+
+            samp_to_events[start].append('{}_{}_NOTEON_{}'.format(instag, start, pitch))
+
+            last_start = start
+            last_end = end
+            last_pitch = pitch
+
+        if last_pitch != -1:
+            samp_to_events[last_start].append('{}_{}_DUR_{}'.format(instag, last_start, last_end - last_start))
+            samp_to_events[last_end].append('{}_NOTEOFF'.format(instag))
+
+    # keep the note off logic to make the WT calculations OK
+    tx1 = []
+    last_samp = 0
+    for samp, events in sorted(samp_to_events.items(), key=lambda x: x[0]):
+        wt = samp - last_samp
+        assert last_samp == 0 or wt > 0
+        if wt > 0:
+            tx1.append('WT_DUR_{}'.format(wt))
+        tx1.extend(events)
+        last_samp = samp
+
+    # now remove all noteoff placeholders, leaving pitch+dur pairs
+    tx1 = [el for el in tx1 if "NOTEOFF" not in el]
+    nsamps = int((midi.time_signature_changes[-1].time * 44100) + 1e-6)
+    if nsamps > last_samp:
+        tx1.append('WT_DUR_{}'.format(nsamps - last_samp))
+
+    tx1 = '\n'.join(tx1)
+    return (midi_fp, tx1)
+
+# dur ranges
+# 100 each?
+# 1:100
+# 101:1000
+# 1001:10000
+# 10001:
+# 1200 across 4 voices... counting WT as its own voice since it is global
+# 2 special tokens for dur SOS EOS
+n_bins = 100
+dur_offset = 2
+# space so there's more buckets near 100?
+#duration_range_low_bins = np.sort(100 + 1 + 1 - np.geomspace(1, 100 + 1, num=n_bins))
+duration_range_low_bins = np.linspace(1, 100 + 1, n_bins)
+duration_range_low_mid_bins = np.linspace(101, 1000 + 1, n_bins)
+duration_range_high_mid_bins = np.linspace(1001, 10000 + 1, n_bins)
+# more buckets near 10k than out at 1M+
+duration_range_high_bins = np.logspace(3, 6, n_bins) + 1
+#duration_range_high_bins = np.linspace(10001, 100000 + 1)
+# shorthand quantize fn
+def q_(x):
+    if x > 10E3:
+        if x > 10E6:
+            # limit, digitize should handle but still
+            x = 10E6
+        return np.digitize([x], duration_range_high_bins)[0] + 3 * n_bins
+    elif x > 1000:
+        return np.digitize([x], duration_range_high_mid_bins)[0] + 2 * n_bins
+    elif x > 100:
+        return np.digitize([x], duration_range_low_mid_bins)[0] + n_bins
+    elif x >= 1:
+        return np.digitize([x], duration_range_low_bins)[0]
+    else:
+        raise ValueError("Unknown quantization input value {}".format(x))
+
+def iq_(x):
+    o_x = int(x) - dur_offset
+    # return middle of the bin?
+    if o_x >= (3 * n_bins):
+        bin_spacing_per = (duration_range_high_bins[1:] - duration_range_high_bins[:-1]) / 2.
+        return duration_range_high_bins[o_x - 3 * n_bins] + bin_spacing_per[o_x - 3 * n_bins]
+    elif o_x >= (2 * n_bins):
+        # uniform spaced here
+        bin_spacing = np.mean(duration_range_high_mid_bins[1:] - duration_range_high_mid_bins[:-1]) / 2.
+        return duration_range_high_mid_bins[o_x - 2 * n_bins] + bin_spacing
+    elif o_x >= (1 * n_bins):
+        bin_spacing = np.mean(duration_range_low_mid_bins[1:] - duration_range_low_mid_bins[:-1]) / 2.
+        return duration_range_low_mid_bins[o_x - 1 * n_bins] + bin_spacing
+    elif o_x >= 0:
+        bin_spacing = np.mean(duration_range_low_bins[1:] - duration_range_low_bins[:-1]) / 2.
+        return duration_range_low_bins[o_x] + bin_spacing
+    else:
+       assert x < dur_offset
+       assert dur_offset == 2
+       if int(x) == 0:
+           return "<s>"
+       else:
+           return "</s>"
+
+# collapse the durs to same buckets
+# forces ambiguity in dur <-> notes mapping 
+dur_p1_offset = dur_offset
+dur_p2_offset = dur_offset #dur_p1_offset + n_bins
+dur_tr_offset = dur_offset #dur_p2_offset + n_bins
+dur_wt_offset = dur_offset #dur_tr_offset + n_bins
+def q_p1(x):
+    return q_(x) + dur_p1_offset
+
+def q_p2(x):
+    return q_(x) + dur_p2_offset
+
+def q_tr(x):
+    return q_(x) + dur_tr_offset
+
+def q_wt(x):
+    return q_(x) + dur_wt_offset
+
+
+# pitch ranges
+# 21 : 108
+# 3 voices
+pitch_min = 21
+pitch_max = 108
+pitch_range = 108 + 1 - 21
+# 1 special WT symbol in notes side
+# SOS and EOS globally (0, 1)
+# so 
+# SOS, EOS, WT
+pitch_offset = 3
+pitch_tokens_p1 = {k: v for k, v in zip(range(pitch_min, pitch_max+1), range(0 + pitch_offset, pitch_offset + pitch_range))}
+rev_pitch_tokens_p1 = {v: k for k, v in pitch_tokens_p1.items()}
+pitch_tokens_p2 = {k: v for k, v in zip(range(pitch_min, pitch_max+1), range(0 + pitch_offset + 1 * pitch_range, pitch_offset + 2 * pitch_range))}
+rev_pitch_tokens_p2 = {v: k for k, v in pitch_tokens_p2.items()}
+pitch_tokens_tr = {k: v for k, v in zip(range(pitch_min, pitch_max+1), range(0 + pitch_offset + 2 * pitch_range, pitch_offset + 3 * pitch_range))}
+rev_pitch_tokens_tr = {v: k for k, v in pitch_tokens_tr.items()}
+assert all([v not in pitch_tokens_p1.values() for v in pitch_tokens_p2.values()])
+assert all([v not in pitch_tokens_p2.values() for v in pitch_tokens_tr.values()])
+
+# useful for the model 
+pitch_n_classes = pitch_range * 3 + pitch_offset
+dur_n_classes = n_bins * 4 + dur_offset
+
+# we will want to also get some information about the normal length to setup models?
+aug_random_state = np.random.RandomState(4142)
+def stringmidi_to_tokenized(midi_tup, do_aug=False):
+    # logic is slightly weird since the original function operated over full lists
+    if midi_tup is None:
+        return
+    miditxt_fp, miditxt = midi_tup
+    # returns tokenized version with all augmentations?
+    events = miditxt.split("\n")
+
+    # pre pitch augment
+    # start by getting max and min pitch shifts allowed
+    if do_aug:
+        pitch_augment_ok = []
+        min_pitch = 21
+        max_pitch = 108
+        for p_o in range(-5, 6 + 1):
+            this_aug_ok = True
+            for event in events:
+                if "NOTEON" in event:
+                    # voice name, event offset (unused), tag for NOTEON, actual pitch
+                    v_n, _, __, p_n = event.split("_")
+                    base_p = int(p_n)
+                    if p_o + base_p > max_pitch:
+                        this_aug_ok = False
+                    elif p_o + base_p < min_pitch:
+                        this_aug_ok = False
+                if not this_aug_ok:
+                    break
+            if this_aug_ok:
+                pitch_augment_ok.append(p_o)
+    else:
+        pitch_augment_ok = [0]
+
+    # do +- 5%? or no
+    # i say no
+    # lets spawn 50 clones of each song? with +- 5% timing variation
+    # do fixed from -5 to +5?
+    # LakhNES does this a fancy way but we are already quantizing to buckets... meh
+    if do_aug:
+        n_augments_to_try = 100
+        z_1 = np.random.uniform(size=n_augments_to_try + 1)
+        # now .95 to 1.05
+        timing_augments = 1 + (.1 * z_1 - .05)
+        # guarantee 1 timing is always the original
+        timing_augments[-1] = 1.
+
+        # we always start with 1
+        timing_augments_final = [1.]
+        # we do this to avoid nasty edge case of multiple processes writing to the same file... ouch
+        timing_str_fnames = {"{:0.4f}".format(1.): None}
+
+        # now we shrink the candidate pool down to unique string values...
+        # if this fails as an edge case, we still won't get name clashes for file write
+        # just less versions of that specific file
+        desired_size = 11
+        for t_a in timing_augments:
+            str_t_a = "{:0.4f}".format(t_a)
+            if str_t_a not in timing_str_fnames:
+                timing_augments_final.append(t_a)
+                timing_str_fnames[str_t_a] = None
+            if len(timing_augments_final) >= desired_size:
+                break
+    else:
+        timing_augments_final = [1.0]
+        str_t_a = "{:0.4f}".format(1.0)
+        timing_str_fnames[str_t_a] = None
+
+    if do_aug:
+        return_orig = aug_random_state.choice(2)
+        if return_orig == 0:
+            pitch_augment_ok = [0]
+            timing_augments_final = [1.0]
+            str_t_a = "{:0.4f}".format(1.0)
+            timing_str_fnames[str_t_a] = None
+        else:
+            # low chance to get 0 pitch aug, fine
+            aug_random_state.shuffle(pitch_augment_ok)
+            pitch_augment_ok = pitch_augment_ok[:1]
+
+            # will always get *some* timing aug
+            aug_random_state.shuffle(timing_augments_final)
+            timing_augments_final = timing_augments_final[:1]
+
+    token_augment_seqs = []
+    for t_a in timing_augments_final:
+        for p_a in pitch_augment_ok:
+            token_seq = []
+            # go orderly
+            for event in events:
+                if "WT" in event:
+                    # tag for WT, tag for DUR, then actual tick dur
+                    _, __, r_d = event.split("_")
+                    int_tick = max(1, int(t_a * int(r_d)))
+                    q_bin = q_wt(int_tick)
+                    token_seq.append("WT_{}".format(q_bin))
+                elif "NOTEON" in event:
+                    # voice name, event offset (unused), tag for NOTEON, actual pitch
+                    v_n, _, __, p_n = event.split("_")
+                    int_pitch = int(p_n)
+                    int_pitch = int_pitch + p_a
+                    if v_n == "P1":
+                        q_pitch = pitch_tokens_p1[int_pitch]
+                    elif v_n == "P2":
+                        q_pitch = pitch_tokens_p2[int_pitch]
+                    elif v_n == "TR":
+                        q_pitch = pitch_tokens_tr[int_pitch]
+                    else:
+                        raise ValueError("Unknown NOTEON voice value {}".format(v_n))
+                    token_seq.append("NOTE_{}".format(q_pitch))
+                elif "DUR" in event:
+                    # voice name, event offset (unused), tag for DUR, then actual tick dur
+                    v_d, _, __, d_d = event.split("_")
+                    int_tick = max(1, int(t_a * int(d_d)))
+                    if v_d == "P1":
+                        q_bin = q_p1(int_tick)
+                    elif v_d == "P2":
+                        q_bin = q_p2(int_tick)
+                    elif v_d == "TR":
+                        q_bin = q_tr(int_tick)
+                    else:
+                        raise ValueError("Unknown DUR voice value {}".format(v_d))
+                    token_seq.append("DUR_{}".format(q_bin))
+                else:
+                    print("Unknown event")
+                    from IPython import embed; embed(); raise ValueError()
+            token_augment_seqs.append((miditxt_fp, p_a, t_a, "\n".join(token_seq)))
+    return token_augment_seqs
+
+all_files = []
+base_filesdir = "nesmdb_midi"
+for fdir in ["train", "valid", "test"]:
+    filesdir = base_filesdir + os.sep + fdir
+    all_files.extend(sorted([filesdir + os.sep + f for f in os.listdir(filesdir)]))
+
+def _read_task(x):
+    np.random.seed((os.getpid() * int(time.time())) % 123456789)
+    print("processing {}".format(x), flush=True)
+    return midi_to_string(x)
+
+n_processes = multiprocessing.cpu_count() - 1
+with multiprocessing.Pool(n_processes) as p:
+    r = [el for el in p.imap_unordered(_read_task, all_files)]
+all_string_tups = [el for el in r if el != None]
 
 def split_process_and_assert(tokenized_seq):
     no_notes = [el for el in tokenized_seq if "NOTE" not in el]
@@ -156,117 +498,8 @@ dur_class_map = {str(el): el for el in range(2, dur_n_classes + 1)}
 dur_class_map["<s>"] = 0
 dur_class_map["</s>"] = 1
 
-memmap_paths = ["train_tok_pitch.memmap", "train_tok_dur.memmap",
-                "valid_tok_pitch.memmap", "valid_tok_dur.memmap",
-                "test_tok_pitch.memmap", "test_tok_dur.memmap"]
-if not all([os.path.exists(memp) for memp in memmap_paths]):
-    def _write_memmap(filepaths):
-        for _n, this_file in enumerate(filepaths):
-            if (_n > 1000) and (_n % 1000 == 0):
-                pct = psutil.virtual_memory().percent
-                if pct > 85:
-                    print("Slowing way down to try and let the system catch up on cached writes... memory growing aggressively")
-                    print("Sleeping process for 30s...")
-                    time.sleep(30)
-            # can manually append to each file...
-            # extra \0 at the very end
-            # TODO: support restart / continuation?
-            if this_file == filepaths[-1]:
-                extra_tag = "\0"
-            else:
-                extra_tag = ""
-            all_tokenized_tups = [el for el in map(_read_task, [this_file])]
-            #r = [el for el in map(_read_task, all_files)]
-            #all_tokenized_tups = r
-            #print("time to process files", stop_time - start_time)
-
-            # shouldn't have conflices here
-            train_tokenized_seqs = [el for name, el in all_tokenized_tups if "_train_" in name]
-            valid_tokenized_seqs = [el for name, el in all_tokenized_tups if "_valid_" in name]
-            test_tokenized_seqs = [el for name, el in all_tokenized_tups if "_test_" in name]
-            del all_tokenized_tups
-            if len(train_tokenized_seqs) != 0:
-                train_split_seqs = [split_process_and_assert(t_i) for t_i in train_tokenized_seqs]
-
-                train_split_seqs_pitch = [train_split_seqs[_ii][0] for _ii in range(len(train_tokenized_seqs))]
-                train_split_seqs_dur = [train_split_seqs[_ii][1] for _ii in range(len(train_tokenized_seqs))]
-
-                train_pitch_str = "\0".join(["\n".join([str(el_i) for el_i in el]) for el in train_split_seqs_pitch]) + extra_tag
-                train_dur_str = "\0".join(["\n".join([str(el_i) for el_i in el]) for el in train_split_seqs_dur]) + extra_tag
-                with open("train_tok_pitch.memmap", "a") as file_handle:
-                    file_handle.write(train_pitch_str)
-                with open("train_tok_dur.memmap", "a") as file_handle:
-                    file_handle.write(train_dur_str)
-            elif len(valid_tokenized_seqs) != 0:
-                valid_split_seqs = [split_process_and_assert(t_i) for t_i in valid_tokenized_seqs]
-
-                valid_split_seqs_pitch = [valid_split_seqs[_ii][0] for _ii in range(len(valid_tokenized_seqs))]
-                valid_split_seqs_dur = [valid_split_seqs[_ii][1] for _ii in range(len(valid_tokenized_seqs))]
-
-                valid_pitch_str = "\0".join(["\n".join([str(el_i) for el_i in el]) for el in valid_split_seqs_pitch]) + extra_tag
-                valid_dur_str = "\0".join(["\n".join([str(el_i) for el_i in el]) for el in valid_split_seqs_dur]) + extra_tag
-                with open("valid_tok_pitch.memmap", "a") as file_handle:
-                    file_handle.write(valid_pitch_str)
-                with open("valid_tok_dur.memmap", "a") as file_handle:
-                    file_handle.write(valid_dur_str)
-            else:
-                assert len(train_tokenized_seqs) == 0
-                assert len(valid_tokenized_seqs) == 0
-                test_split_seqs = [split_process_and_assert(t_i) for t_i in test_tokenized_seqs]
-
-                test_split_seqs_pitch = [test_split_seqs[_ii][0] for _ii in range(len(test_tokenized_seqs))]
-                test_split_seqs_dur = [test_split_seqs[_ii][1] for _ii in range(len(test_tokenized_seqs))]
-
-                test_pitch_str = "\0".join(["\n".join([str(el_i) for el_i in el]) for el in test_split_seqs_pitch]) + extra_tag
-                test_dur_str = "\0".join(["\n".join([str(el_i) for el_i in el]) for el in test_split_seqs_dur]) + extra_tag
-                with open("test_tok_pitch.memmap", "a") as file_handle:
-                    file_handle.write(test_pitch_str)
-                with open("test_tok_dur.memmap", "a") as file_handle:
-                    file_handle.write(test_dur_str)
-    # process for each train val test
-    print("Starting multiprocessing jobs")
-    start_time = time.time()
-    # parallelize train valid and test... 3x speedup
-    train_files = [el for el in all_files if "_train_" in el]
-    valid_files = [el for el in all_files if "_valid_" in el]
-    test_files = [el for el in all_files if "_test_" in el]
-    """
-    with multiprocessing.Pool(n_processes) as p:
-        r = [el for el in p.imap_unordered(_read_task, all_files)]
-    """
-    n_processes = 3
-    with multiprocessing.Pool(n_processes) as p:
-        # let each process inspect the pool so we can wait a bit on processing if the cache gets big...
-        p.imap_unordered(_write_memmap, [train_files, valid_files, test_files])
-        p.close()
-        p.join()
-    stop_time = time.time()
-    print("total time to parse and create memmap blobs,", stop_time - start_time)
-
-print("memmap from saved cache")
-# reading back into memory... probably could rewrite to just use the memmap but it should fit in mem
-train_pitch_blob = IndexedBlob("train_tok_pitch.memmap")
-train_pitch_blob_indices = list(range(0, len(train_pitch_blob.indices) - 1))
-train_dur_blob = IndexedBlob("train_tok_dur.memmap")
-train_dur_blob_indices = list(range(0, len(train_dur_blob.indices) - 1))
-train_int_tokenized_seqs = [([int(el) for el in train_pitch_blob[train_pitch_blob_indices[_ii]].split("\n") if el != ""],
-                             [int(el) for el in train_dur_blob[train_dur_blob_indices[_ii]].split("\n") if el != ""]) for _ii in train_pitch_blob_indices]
-#from IPython import embed; embed(); raise ValueError()
-#train_tokenized_seqs = [train_blob[train_blob_indices[_ii]].split("\n") for _ii in train_blob_indices]
-#train_tokenized_seqs = [[el_i for el_i in el if el_i != ""] for el in train_tokenized_seqs]
-valid_pitch_blob = IndexedBlob("valid_tok_pitch.memmap")
-valid_pitch_blob_indices = list(range(0, len(valid_pitch_blob.indices) - 1))
-valid_dur_blob = IndexedBlob("valid_tok_dur.memmap")
-valid_dur_blob_indices = list(range(0, len(valid_dur_blob.indices) - 1))
-valid_int_tokenized_seqs = [([int(el) for el in valid_pitch_blob[valid_pitch_blob_indices[_ii]].split("\n") if el != ""],
-                             [int(el) for el in valid_dur_blob[valid_dur_blob_indices[_ii]].split("\n") if el != ""]) for _ii in valid_pitch_blob_indices]
-
-test_pitch_blob = IndexedBlob("test_tok_pitch.memmap")
-test_pitch_blob_indices = list(range(0, len(test_pitch_blob.indices) - 1))
-test_dur_blob = IndexedBlob("test_tok_dur.memmap")
-test_dur_blob_indices = list(range(0, len(test_dur_blob.indices) - 1))
-test_int_tokenized_seqs = [([int(el) for el in test_pitch_blob[test_pitch_blob_indices[_ii]].split("\n") if el != ""],
-                            [int(el) for el in test_dur_blob[test_dur_blob_indices[_ii]].split("\n") if el != ""]) for _ii in test_pitch_blob_indices]
+# this line will process a single file, what we want for data loader 
+# split_process_and_assert(stringmidi_to_tokenized(train_string_tups[0], do_aug=True)[0][-1].split("\n"))
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 model_save_path = "parallel_perceiversunmask_nesmdb_{}_models".format(args.task)
@@ -274,7 +507,7 @@ if not os.path.exists(model_save_path):
     os.mkdir(model_save_path)
 n_unrolled_steps = 2
 
-batch_size = 20
+batch_size = 6
 
 # use 512 of dur, 512 of pitch for 1024 total
 sequence_length = 1024
@@ -299,15 +532,14 @@ valid_steps_per = 20
 save_every = n_train_steps // 10
 show_every = max(1, n_train_steps // 500)
 
+# only keep at least max len
+all_string_tups = [el for el in all_string_tups if len(el[1].split("\n")) >= sequence_length]
+train_string_tups = [(name, el) for name, el in all_string_tups if os.sep + "train" + os.sep in name]
+valid_string_tups = [(name, el) for name, el in all_string_tups if os.sep + "valid" + os.sep in name]
+test_string_tups = [(name, el) for name, el in all_string_tups if os.sep + "test" + os.sep in name]
+
+
 # preprocess and throw out any sequences < latent_length
-
-train_split_seqs = [el for el in train_split_seqs if len(el[0]) > latent_length]
-train_indices = list(range(len(train_split_seqs)))
-valid_split_seqs = [el for el in valid_split_seqs if len(el[0]) > latent_length]
-valid_indices = list(range(len(valid_split_seqs)))
-test_split_seqs = [el for el in test_split_seqs if len(el[0]) > latent_length]
-test_indices = list(range(len(test_split_seqs)))
-
 itr_random_state = np.random.RandomState(5122)
 def dataset_itr(batch_size, subset_type="train", target="notes", seed=1234):
     """
@@ -316,17 +548,22 @@ def dataset_itr(batch_size, subset_type="train", target="notes", seed=1234):
     a random batch of previous replay experiences.
     """
     if subset_type == "train":
-        use_seqs = train_split_seqs
-        use_indices = train_indices
+        use_tups = train_string_tups
     elif subset_type == "valid":
-        use_seqs = valid_split_seqs
-        use_indices = valid_indices
+        use_tups = valid_string_tups
+    elif subset_type == "test":
+        use_tups = test_string_tups
     else:
         raise ValueError("Unknown subset_type {}".format(subset_type))
+    use_indices = list(range(len(use_tups)))
 
     # start middle end 1/3rd each
     def slice_(ind):
-        this_el = use_seqs[ind]
+        if subset_type in ["train", "valid"]:
+            aug_flag = True
+        else:
+            aug_flag = False
+        this_el = split_process_and_assert(stringmidi_to_tokenized(use_tups[ind], do_aug=aug_flag)[0][-1].split("\n"))
         el_len = len(this_el[0])
         # pitch, dur tuple
         type_split = itr_random_state.randint(3)
